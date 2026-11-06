@@ -234,3 +234,14 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .att a:hover, .tbl a:hover, .detail-head a:hover { text-decoration: underline; }
 .att .what a b { color: var(--ink); }
 .att .what a:hover b { color: var(--accent); }
+
+/* Compliance grid */
+.comp-grid td, .comp-grid th { text-align: center; }
+.comp-grid td:first-child, .comp-grid th:first-child { text-align: left; position: sticky; left: 0; background: var(--panel); z-index: 1; min-width: 200px; }
+.comp-grid .cells { display: flex; flex-wrap: wrap; gap: 4px; justify-content: center; max-width: 260px; margin: 0 auto; }
+.cellbtn { border: none; background: none; padding: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; }
+.cellbtn small { color: var(--muted); font-size: 10.5px; }
+.cellbtn:hover .chip { outline: 1px solid var(--accent); }
+.stack { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--panel-2); border: 1px solid var(--line); }
+.stack i { display: block; height: 100%; }
+.stack i.gap { background: repeating-linear-gradient(45deg, transparent 0 6px, var(--line-strong) 6px 8px); }

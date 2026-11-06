@@ -29,6 +29,10 @@ window.CB_DEMO = (blank, uid) => {
     C('Lakeview Tech Solutions Pvt Ltd', 'Company', 'Technopark', 'Priya S', { gstin: '32AADCL7788C1Z9' }),
   ];
   S.clients = clients;
+  clients[0].filingCodes = ['AGM', 'AOC4', 'MGT7', 'ADT1', 'DIR3', 'ITRCO', 'GSTR9', 'TDS'];
+  clients[1].filingCodes = ['F8', 'F11', 'DIR3', 'ITRLLP', 'GSTR9', 'TDS'];
+  clients[2].filingCodes = ['F8', 'F11', 'DIR3'];
+  clients[6].filingCodes = ['AGM', 'AOC4', 'MGT7', 'DIR3', 'DPT3', 'MSME1', 'ITRCO', 'TAR', 'TDS'];
   const [spice, green, stays, meera, periyar, anand, lake] = clients;
   let seq = 0;
   const jobs = [];

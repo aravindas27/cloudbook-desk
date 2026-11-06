@@ -15,6 +15,28 @@
   const PAY_MODES = ['Bank transfer', 'UPI', 'Cheque', 'Cash'];
   const CATEGORIES = ['GST', 'TDS', 'Income tax', 'Accounts', 'ROC / MCA', 'Payroll', 'Advisory', 'Other'];
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const FILING_STATUS = ['Pending', 'In progress', 'Filed', 'Not applicable'];
+  // Statutory filings. kind 'annual': due on md in the first calendar year of the compliance FY
+  // (accounts year just ended). kind 'tdsq': quarterly TDS returns. late = estimated late fee.
+  const FILINGS = [
+    { code: 'AGM', name: 'Board meeting & AGM (minutes, notices)', short: 'AGM', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '09-30', fee: 2000 },
+    { code: 'AOC4', name: 'AOC-4 · financial statements', short: 'AOC-4', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '10-29', fee: 4000, late: { perDay: 100 } },
+    { code: 'MGT7', name: 'MGT-7 / 7A · annual return', short: 'MGT-7', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '11-28', fee: 3000, late: { perDay: 100 } },
+    { code: 'ADT1', name: 'ADT-1 · auditor appointment', short: 'ADT-1', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '10-14', fee: 1500, late: { perDay: 100 } },
+    { code: 'DIR3', name: 'DIR-3 KYC · directors / partners', short: 'DIR-3', cat: 'ROC / MCA', applies: ['Company', 'LLP'], kind: 'annual', md: '09-30', fee: 1000, late: { flat: 5000 } },
+    { code: 'DPT3', name: 'DPT-3 · return of deposits', short: 'DPT-3', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '06-30', fee: 2000, late: { perDay: 100 } },
+    { code: 'MSME1', name: 'MSME-1 · dues to MSMEs (Oct–Mar)', short: 'MSME-1', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '04-30', fee: 1000 },
+    { code: 'INC20A', name: 'INC-20A · commencement of business', short: 'INC-20A', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '06-30', fee: 2500, late: { flat: 50000 } },
+    { code: 'FLA', name: 'FLA return · RBI (foreign investment)', short: 'FLA', cat: 'ROC / MCA', applies: ['Company'], kind: 'annual', md: '07-15', fee: 3000 },
+    { code: 'F11', name: 'LLP Form 11 · annual return', short: 'Form 11', cat: 'ROC / MCA', applies: ['LLP'], kind: 'annual', md: '05-30', fee: 1800, late: { perDay: 100 } },
+    { code: 'F8', name: 'LLP Form 8 · statement of accounts', short: 'Form 8', cat: 'ROC / MCA', applies: ['LLP'], kind: 'annual', md: '10-30', fee: 1800, late: { perDay: 100 } },
+    { code: 'ITRCO', name: 'ITR-6 · company income tax return', short: 'ITR-6', cat: 'Income tax', applies: ['Company'], kind: 'annual', md: '10-31', fee: 5000, late: { flat: 5000 } },
+    { code: 'ITRLLP', name: 'ITR-5 · LLP / firm income tax return', short: 'ITR-5', cat: 'Income tax', applies: ['LLP', 'Partnership firm', 'Society / Trust'], kind: 'annual', md: '07-31', fee: 2500, late: { flat: 5000 } },
+    { code: 'TAR', name: 'Tax audit / 3CEB report', short: '3CD/3CEB', cat: 'Income tax', applies: ['Company', 'LLP', 'Partnership firm', 'Proprietorship'], kind: 'annual', md: '09-30', fee: 10000 },
+    { code: 'GSTR9', name: 'GSTR-9 · GST annual return', short: 'GSTR-9', cat: 'GST', applies: ['Any'], kind: 'annual', md: '12-31', fee: 6000, late: { perDay: 200 } },
+    { code: 'TDS', name: 'TDS returns 24Q / 26Q (quarterly)', short: 'TDS', cat: 'TDS', applies: ['Any'], kind: 'tdsq', fee: 1500, late: { perDay: 200 } },
+  ];
+  const FIL = Object.fromEntries(FILINGS.map((f) => [f.code, f]));
 
   const DEFAULT_SERVICES = [
     ['GST return filing (GSTR-1 & 3B)', 'GST', 'monthly', 1000, 2.5],
@@ -77,10 +99,10 @@
   let S;
   const blank = () => ({
     version: 1,
-    settings: { firmName: 'Cloudbook Associates LLP', gstin: '', pan: '', address: '', phone: '', email: '', gstRate: 18, fyStartMonth: 4, invoiceDueDays: 15, defaultCostRate: 350, capacityHours: 160, invoicePrefix: 'INV-', jobPrefix: 'J-' },
+    settings: { firmName: 'Cloudbook Associates LLP', gstin: '', pan: '', address: '', phone: '', email: '', gstRate: 18, fyStartMonth: 4, invoiceDueDays: 15, defaultCostRate: 350, capacityHours: 160, invoicePrefix: 'INV-', jobPrefix: 'J-', fyTarget: 1000000 },
     team: [{ id: 'm_owner', name: 'Aravind A S', role: 'Designated Partner', costRate: 500, billRate: 1200, capacity: 160, active: true }],
     services: DEFAULT_SERVICES.map(([name, category, recurring, fee, hours]) => ({ id: uid('s'), name, category, recurring, fee, hours })),
-    clients: [], jobs: [], time: [], invoices: [],
+    clients: [], jobs: [], time: [], invoices: [], filings: [],
     seq: { job: 0, invoice: 0 },
     started: false,
   });
@@ -95,7 +117,8 @@
   function migrate(d) {
     const b = blank();
     d.settings = Object.assign({}, b.settings, d.settings || {});
-    ['team', 'services', 'clients', 'jobs', 'time', 'invoices'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
+    ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
+    d.clients.forEach((c) => { if (!Array.isArray(c.filingCodes)) c.filingCodes = []; });
     d.seq = Object.assign({ job: 0, invoice: 0 }, d.seq || {});
     d.invoices.forEach((i) => { if (!Array.isArray(i.payments)) i.payments = []; if (!Array.isArray(i.jobIds)) i.jobIds = []; });
     return d;
@@ -157,6 +180,66 @@
     return { start, end, label: m === 1 ? String(y) : `${y}-${String((y + 1) % 100).padStart(2, '0')}` };
   }
   const inRange = (s, r) => s && s >= r.start && s <= r.end;
+
+  // ---------- Compliance ----------
+  const yy = (y) => String(y % 100).padStart(2, '0');
+  const fyStr = (y) => `FY ${y}-${yy(y + 1)}`;
+  // Instances of a filing whose due date falls inside the compliance year starting in April of y1.
+  function filingInstances(code, y1) {
+    const f = FIL[code]; if (!f) return [];
+    if (f.kind === 'tdsq') {
+      return [
+        { period: `Q4 ${fyStr(y1 - 1)}`, due: `${y1}-05-31` },
+        { period: `Q1 ${fyStr(y1)}`, due: `${y1}-07-31` },
+        { period: `Q2 ${fyStr(y1)}`, due: `${y1}-10-31` },
+        { period: `Q3 ${fyStr(y1)}`, due: `${y1 + 1}-01-31` },
+      ];
+    }
+    return [{ period: fyStr(y1 - 1), due: `${y1}-${f.md}` }];
+  }
+  const filingKey = (clientId, code, period) => `${clientId}|${code}|${period}`;
+  const filingDone = (f) => f.status === 'Filed' || f.status === 'Not applicable';
+  const filingOverdue = (f) => !filingDone(f) && f.due && f.due < todayISO();
+  function lateFee(f) {
+    const L = FIL[f.code]?.late; if (!L || !filingOverdue(f)) return 0;
+    if (L.flat) return L.flat;
+    return Math.max(0, -daysFrom(f.due)) * L.perDay;
+  }
+  function filingChip(f, short) {
+    if (f.status === 'Filed') return `<span class="chip ok">${short ? 'Filed' : 'Filed' + (f.filedOn ? ' ' + fmtDs(f.filedOn) : '')}</span>`;
+    if (f.status === 'Not applicable') return '<span class="chip">N/A</span>';
+    const d = daysFrom(f.due);
+    if (d < 0) return `<span class="chip bad">${short ? -d + 'd late' : 'Overdue · ' + -d + 'd'}</span>`;
+    if (d <= 15) return `<span class="chip warn">${short ? 'Due ' + fmtDs(f.due) : 'Due in ' + d + 'd'}</span>`;
+    return `<span class="chip ${f.status === 'In progress' ? 'info' : ''}">${short ? fmtDs(f.due) : f.status + ' · ' + fmtDs(f.due)}</span>`;
+  }
+  function generateFilings(y1, onlyClient) {
+    let n = 0;
+    S.clients.filter((c) => (!onlyClient || c.id === onlyClient) && c.filingCodes && c.filingCodes.length).forEach((c) => {
+      c.filingCodes.forEach((code) => {
+        filingInstances(code, y1).forEach((ins) => {
+          const key = filingKey(c.id, code, ins.period);
+          if (S.filings.some((f) => f.key === key)) return;
+          S.filings.push({ id: uid('f'), key, clientId: c.id, code, period: ins.period, due: ins.due, status: 'Pending', fee: FIL[code].fee, govtFee: 0, srn: '', filedOn: null, jobId: null, notes: '' });
+          n++;
+        });
+      });
+    });
+    return n;
+  }
+  // Create (or update) the billing job behind a filing so it flows into "Ready to bill".
+  function jobForFiling(f) {
+    let j = f.jobId ? job(f.jobId) : null;
+    const def = FIL[f.code];
+    if (!j) {
+      j = { id: uid('j'), code: nextJobCode(), clientId: f.clientId, title: `${def.short} – ${f.period}`, service: def.name, period: f.period, ownerId: S.team[0]?.id, start: todayISO(), due: f.due, status: 'Not started', priority: filingOverdue(f) ? 'High' : 'Normal', fee: num(f.fee), budgetHours: def.kind === 'tdsq' ? 2 : 3, govtFees: num(f.govtFee), recurring: 'none', billing: 'Not billed', invoiceId: null, notes: 'Created from the compliance tracker', doneOn: null, created: todayISO(), filingId: f.id };
+      S.jobs.push(j); f.jobId = j.id;
+    }
+    if (f.status === 'Filed' && !isDone(j)) { j.status = DONE; j.doneOn = f.filedOn || todayISO(); }
+    if (f.status === 'In progress' && j.status === 'Not started') j.status = 'In progress';
+    if (j.billing === 'Not billed') { j.fee = num(f.fee); j.govtFees = num(f.govtFee); }
+    return j;
+  }
   function periodRange(key) {
     const fy = fyOf();
     if (key === 'fy') return fy;
@@ -206,6 +289,7 @@
     ts: { week: startOfWeek(todayISO()) },
     att: 'overdue',
     reports: { tab: 'clients', period: 'fy', month: monthKey(todayISO()) },
+    comp: { y1: null, view: 'grid', status: 'open', client: '', cat: '' },
   };
 
   // ---------- Rendering ----------
@@ -226,6 +310,7 @@
     $('#brand-name').innerHTML = `${esc(shortFirm())}<small>Practice desk</small>`;
     const od = S.jobs.filter(isOverdue).length;
     const b = $('#nav-overdue'); b.hidden = !od; b.textContent = od;
+    const fo = S.filings.filter(filingOverdue).length; const bf = $('#nav-filings'); if (bf) { bf.hidden = !fo; bf.textContent = fo; }
     let html = '';
     try { html = page(id); } catch (e) { console.error(e); html = `<div class="card card-b"><b>Something went wrong showing this page.</b><p class="t-muted">${esc(e.message)}</p></div>`; }
     view().innerHTML = banner() + html;
@@ -319,6 +404,7 @@
     const week = S.jobs.filter((j) => !isDone(j) && j.due && daysFrom(j.due) >= 0 && daysFrom(j.due) <= 7);
     const overBudget = S.jobs.filter((j) => !isDone(j) && jobStats(j).over);
     const late = open.filter((x) => x.st.daysOver > 30).sort((a, b) => b.st.daysOver - a.st.daysOver);
+    const filOver = S.filings.filter(filingOverdue).sort((a, b) => a.due.localeCompare(b.due));
 
     const kpis = `<section class="kpis">
       <a class="kpi alert" href="#jobs" data-act="jobsReady"><span class="l">Finished, not invoiced</span><span class="v">${inrC(readyAmt)}</span><span class="s">${ready.length} job${ready.length === 1 ? '' : 's'} ready to bill</span></a>
@@ -326,19 +412,21 @@
       <a class="kpi good" href="#invoices"><span class="l">Collected this month</span><span class="v">${inrC(collMonth)}</span><span class="s">${inr(billedMonth)} billed this month</span></a>
       <a class="kpi" href="#reports"><span class="l">Fees billed, FY ${fy.label}</span><span class="v">${inrC(billedFY)}</span><span class="s">${pct(fyTotal ? fyRecv / fyTotal : null)} of FY billing collected</span></a>
       <a class="kpi" href="#reports"><span class="l">Margin on finished work</span><span class="v">${pct(feeD ? (feeD - costD) / feeD : null)}</span><span class="s">${inr(hD ? feeD / hD : null)} earned per hour</span></a>
-      <a class="kpi ${overdue.length ? 'bad' : ''}" href="#deadlines"><span class="l">Overdue jobs</span><span class="v">${overdue.length}</span><span class="s">${week.length} due in the next 7 days</span></a>
+      <a class="kpi ${overdue.length + filOver.length ? 'bad' : ''}" href="#compliance"><span class="l">Overdue jobs · filings</span><span class="v">${overdue.length} · ${filOver.length}</span><span class="s">${week.length} jobs due in the next 7 days</span></a>
     </section>`;
 
     const tabs = [
       ['overdue', 'Overdue', overdue.length],
       ['ready', 'Ready to bill', ready.length],
       ['late', 'Unpaid 30+ days', late.length],
+      ['filings', 'Filings overdue', filOver.length],
       ['budget', 'Over budget', overBudget.length],
     ];
     let list = '';
     if (UI.att === 'overdue') list = overdue.sort((a, b) => a.due.localeCompare(b.due)).slice(0, 8).map((j) => `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)} · ${esc(member(j.ownerId)?.name || 'Unassigned')}</small></div>${dueChip(j)}</li>`).join('');
     if (UI.att === 'ready') list = ready.sort((a, b) => num(b.fee) - num(a.fee)).slice(0, 8).map((j) => `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)}${j.doneOn ? ' · done ' + fmtDs(j.doneOn) : ''}</small></div><span class="amt">${inr(j.fee)}</span><button class="btn sm" data-act="newInvoice" data-client="${j.clientId}">Invoice</button></li>`).join('');
     if (UI.att === 'late') list = late.slice(0, 8).map((x) => `<li><div class="what"><a href="#invoice/${x.i.id}"><b>${esc(x.i.number)}</b></a><small>${esc(client(x.i.clientId).name)} · due ${fmtDs(x.i.dueDate)}</small></div><span class="amt">${inr(x.st.balance)}</span><span class="chip bad plain">${x.st.daysOver}d</span></li>`).join('');
+    if (UI.att === 'filings') list = filOver.slice(0, 8).map((f) => `<li><div class="what"><a href="#compliance" data-act="filing" data-id="${f.id}"><b>${esc(FIL[f.code]?.name || f.code)}</b></a><small>${esc(client(f.clientId).name)} · ${esc(f.period)}</small></div>${lateFee(f) ? `<span class="amt t-bad">≈ ${inr(lateFee(f))}</span>` : ''}${filingChip(f, true)}</li>`).join('');
     if (UI.att === 'budget') list = overBudget.slice(0, 8).map((j) => { const s = jobStats(j); return `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)}</small></div><span class="amt t-bad">${hrs(s.hours)} / ${hrs(j.budgetHours)} h</span></li>`; }).join('');
     const att = `<div class="card"><div class="card-h"><h2>Needs your attention</h2></div>
       <div class="tabs" role="tablist">${tabs.map(([k, l, n]) => `<button class="${UI.att === k ? 'on' : ''}" data-act="att" data-k="${k}" role="tab" aria-selected="${UI.att === k}">${l}<span class="n">${n}</span></button>`).join('')}</div>
@@ -500,7 +588,10 @@
         <div class="tbl-wrap"><table class="tbl"><tbody>${js.map((j) => `<tr class="click" data-href="#job/${j.id}"><td style="width:150px">${dueChip(j)}</td><td><b style="font-weight:500">${esc(j.title)}</b><small>${esc(client(j.clientId).name)}${j.period ? ' · ' + esc(j.period) : ''}</small></td><td>${esc(member(j.ownerId)?.name || '—')}</td><td>${statusChip(j.status)}</td></tr>`).join('')}</tbody></table></div></div>`;
     }).join('');
     const cal = statutoryCalendar(todayISO(), 60);
-    return `<div class="grid g2" style="align-items:start"><div style="display:flex;flex-direction:column;gap:18px">${sec || `<div class="card">${empty('No open jobs', 'Every job is done.')}</div>`}</div>
+    const fils = S.filings.filter((f) => !filingDone(f) && f.due && daysFrom(f.due) <= 45).sort((a, b) => a.due.localeCompare(b.due));
+    const filCard = fils.length ? `<div class="card"><div class="card-h"><h2>Client filings due or overdue</h2><span class="hint">From the compliance tracker · next 45 days and anything late</span><span class="right"><a class="btn sm" href="#compliance">Compliance</a></span></div>
+      <div class="tbl-wrap"><table class="tbl"><tbody>${fils.map((f) => `<tr class="click" data-act="filing" data-id="${f.id}"><td style="width:150px">${filingChip(f)}</td><td><b style="font-weight:500">${esc(FIL[f.code]?.name || f.code)}</b><small>${esc(client(f.clientId).name)} · ${esc(f.period)}</small></td><td class="n">${inr(num(f.fee))}</td></tr>`).join('')}</tbody></table></div></div>` : '';
+    return `<div class="grid g2" style="align-items:start"><div style="display:flex;flex-direction:column;gap:18px">${filCard}${sec || `<div class="card">${empty('No open jobs', 'Every job is done.')}</div>`}</div>
       <div class="card"><div class="card-h"><h2>Statutory due dates</h2><span class="hint">Next 60 days · standard dates, check the portal for extensions</span></div>
       <div class="tbl-wrap"><table class="tbl"><tbody>${cal.map((x) => `<tr><td style="width:110px" class="${daysFrom(x.date) <= 3 ? 't-warn' : ''}">${fmtDs(x.date)}<small>${daysFrom(x.date) === 0 ? 'today' : 'in ' + daysFrom(x.date) + ' days'}</small></td><td><b style="font-weight:500">${esc(x.what)}</b><small>${esc(x.detail)}</small></td><td><span class="chip plain">${esc(x.cat)}</span></td></tr>`).join('')}</tbody></table></div></div></div>`;
   };
@@ -659,6 +750,8 @@
         <div class="card"><div class="card-h"><h2>Jobs</h2></div>${js.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${js.map((j) => { const s = jobStats(j); return `<tr class="click" data-href="#job/${j.id}"><td><b style="font-weight:500">${esc(j.title)}</b><small>${esc(j.period || '')}</small></td><td>${statusChip(j.status)}</td><td class="n">${inr(num(j.fee))}</td><td class="n">${marginCell(s)}</td></tr>`; }).join('')}</tbody></table></div>` : empty('No jobs', 'Open the first job for this client.')}</div>
         <div class="card"><div class="card-h"><h2>Invoices</h2></div>${invs.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${invs.map((i) => { const s = invStats(i); return `<tr class="click" data-href="#invoice/${i.id}"><td><b style="font-weight:500">${esc(i.number)}</b><small>${fmtD(i.date)}</small></td><td class="n">${inr(i.total)}</td><td>${invChip(s)}</td></tr>`; }).join('')}</tbody></table></div>` : empty('No invoices', 'Nothing billed yet.')}</div>
       </div>
+      <div class="card"><div class="card-h"><h2>Compliance</h2><span class="hint">${(c.filingCodes || []).length ? (c.filingCodes || []).map((x) => FIL[x]?.short || x).join(' · ') : 'No filings set up'}</span><span class="right"><button class="btn sm" data-act="compProfile" data-id="${c.id}">Set up filings</button></span></div>
+        ${(() => { const fs = S.filings.filter((f) => f.clientId === c.id).sort((a, b) => b.due.localeCompare(a.due)); return fs.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${fs.map((f) => `<tr class="click" data-act="filing" data-id="${f.id}"><td>${esc(FIL[f.code]?.name || f.code)}<small>${esc(f.period)}${f.srn ? ' · SRN ' + esc(f.srn) : ''}</small></td><td>${filingChip(f)}</td><td class="n">${inr(num(f.fee))}</td></tr>`).join('')}</tbody></table></div>` : empty('No filings yet', 'Set up the filings you handle for this client.'); })()}</div>
       <div><button class="btn danger" data-act="deleteClient" data-id="${c.id}">Delete client</button></div>`;
   };
 
@@ -718,6 +811,136 @@
     return { cols: [{ key: 'month', label: 'Month' }, { key: 'fee', label: 'Fees billed', n: 1, fmt: inr }, { key: 'gst', label: 'GST billed', n: 1, fmt: inr }, { key: 'coll', label: 'Collected', n: 1, fmt: inr }, { key: 'hours', label: 'Hours logged', n: 1, fmt: hrs }, { key: 'done', label: 'Jobs completed', n: 1 }], rows, total: T, note: `FY ${fy.label}, month by month.` };
   }
 
+  PAGES.compliance = () => {
+    const C = UI.comp;
+    if (!C.y1) C.y1 = +fyOf().start.slice(0, 4);
+    const y1 = C.y1, range = { start: `${y1}-04-01`, end: `${y1 + 1}-03-31` };
+    setHead('Compliance', `Statutory filings due in ${fyStr(y1)} · ROC/MCA, income tax, TDS, GST`, `<button class="btn" data-act="genFilings">Generate filings for ${fyStr(y1)}</button> <button class="btn primary" data-act="compProfile">Set up a client</button>`);
+    const all = S.filings.filter((f) => inRange(f.due, range));
+    const profiled = S.clients.filter((c) => c.filingCodes && c.filingCodes.length);
+    const pend = all.filter((f) => !filingDone(f)), over = all.filter(filingOverdue);
+    const soon = pend.filter((f) => !filingOverdue(f) && daysFrom(f.due) <= 30);
+    const feeAll = sum(all.filter((f) => f.status !== 'Not applicable'), (f) => f.fee);
+    const feeOpen = sum(all.filter((f) => f.status !== 'Not applicable' && !(f.jobId && job(f.jobId)?.billing === 'Billed')), (f) => f.fee);
+    const risk = sum(over, lateFee);
+    const kpis = `<section class="kpis">
+      <div class="kpi ${over.length ? 'bad' : ''}"><span class="l">Overdue filings</span><span class="v">${over.length}</span><span class="s">client late fees so far ≈ ${inr(risk)}</span></div>
+      <div class="kpi alert"><span class="l">Due in 30 days</span><span class="v">${soon.length}</span><span class="s">${pend.length} pending in total</span></div>
+      <div class="kpi good"><span class="l">Filed this year</span><span class="v">${all.filter((f) => f.status === 'Filed').length}</span><span class="s">of ${all.filter((f) => f.status !== 'Not applicable').length} filings</span></div>
+      <div class="kpi"><span class="l">Compliance fees, ${fyStr(y1)}</span><span class="v">${inrC(feeAll)}</span><span class="s">${inr(feeOpen)} not yet invoiced</span></div>
+    </section>`;
+    const yearNav = `<span class="right"><button class="btn sm" data-act="compYear" data-d="-1">← ${fyStr(y1 - 1)}</button><button class="btn sm" data-act="compYear" data-d="1">${fyStr(y1 + 1)} →</button></span>`;
+    if (!profiled.length && !all.length) {
+      return kpis + `<div class="card">${empty('No clients set up for compliance yet', 'Choose a company or LLP and tick the filings you handle for it (AOC-4, MGT-7, DIR-3 KYC, Form 8, Form 11, ITR, TDS…). Then generate the year’s filings.', '<button class="btn primary" data-act="compProfile">Set up a client</button>')}</div>`;
+    }
+    const tabs = `<div class="tabs">${[['grid', 'Client grid'], ['list', 'By due date']].map(([k, l]) => `<button class="${C.view === k ? 'on' : ''}" data-act="compView" data-k="${k}">${l}</button>`).join('')}</div>`;
+    let body = '';
+    if (C.view === 'grid') {
+      const codes = FILINGS.map((f) => f.code).filter((code) => all.some((f) => f.code === code) || profiled.some((c) => c.filingCodes.includes(code)));
+      const clientsInGrid = S.clients.filter((c) => all.some((f) => f.clientId === c.id) || (c.filingCodes || []).length).sort((a, b) => a.name.localeCompare(b.name));
+      body = `<div class="tbl-wrap"><table class="tbl comp-grid"><thead><tr><th>Client</th>${codes.map((code) => `<th title="${esc(FIL[code].name)}">${esc(FIL[code].short)}</th>`).join('')}<th class="n">Fees</th></tr></thead><tbody>
+      ${clientsInGrid.map((c) => {
+        const cf = all.filter((f) => f.clientId === c.id);
+        return `<tr><td><a href="#client/${c.id}"><b style="font-weight:500">${esc(c.name)}</b></a><small>${esc(c.type || '')} · <a href="#" data-act="compProfile" data-id="${c.id}">filings</a></small></td>${codes.map((code) => {
+          const fs = cf.filter((f) => f.code === code).sort((a, b) => a.due.localeCompare(b.due));
+          if (!fs.length) return `<td class="t-muted">${(c.filingCodes || []).includes(code) ? '<span class="t-muted" title="Generate filings to add">·</span>' : ''}</td>`;
+          return `<td><div class="cells">${fs.map((f) => `<button class="cellbtn" data-act="filing" data-id="${f.id}" title="${esc(FIL[code].name)} · ${esc(f.period)}">${FIL[code].kind === 'tdsq' ? `<small>${esc(f.period.split(' ')[0])}</small>` : ''}${filingChip(f, true)}</button>`).join('')}</div></td>`;
+        }).join('')}<td class="n">${inr(sum(cf.filter((f) => f.status !== 'Not applicable'), (f) => f.fee))}</td></tr>`;
+      }).join('')}</tbody></table></div>`;
+    } else {
+      let rows = all.slice();
+      if (C.status === 'open') rows = rows.filter((f) => !filingDone(f));
+      if (C.status === 'overdue') rows = rows.filter(filingOverdue);
+      if (C.status === 'Filed') rows = rows.filter((f) => f.status === 'Filed');
+      if (C.client) rows = rows.filter((f) => f.clientId === C.client);
+      if (C.cat) rows = rows.filter((f) => FIL[f.code]?.cat === C.cat);
+      rows.sort((a, b) => a.due.localeCompare(b.due));
+      body = `<div class="card-b"><div class="filters">
+        <select class="input" id="f-comp-status" data-filter="comp.status" aria-label="Status">${[['open', 'Pending'], ['overdue', 'Overdue'], ['Filed', 'Filed'], ['', 'All']].map(([v, l]) => `<option value="${v}" ${C.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select class="input" id="f-comp-client" data-filter="comp.client" aria-label="Client"><option value="">All clients</option>${clientOptions().map(([v, l]) => `<option value="${v}" ${C.client === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+        <select class="input" id="f-comp-cat" data-filter="comp.cat" aria-label="Type"><option value="">All types</option>${['ROC / MCA', 'Income tax', 'TDS', 'GST'].map((c) => `<option ${C.cat === c ? 'selected' : ''}>${c}</option>`).join('')}</select></div></div>
+        ${rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Due</th><th>Filing</th><th>Client</th><th>Status</th><th class="n">Fee</th><th class="n">Late fee so far</th><th>Billing</th></tr></thead><tbody>
+        ${rows.map((f) => { const j = f.jobId ? job(f.jobId) : null; return `<tr class="click" data-act="filing" data-id="${f.id}"><td>${fmtDs(f.due)}</td><td><b style="font-weight:500">${esc(FIL[f.code]?.name || f.code)}</b><small>${esc(f.period)}${f.srn ? ' · SRN ' + esc(f.srn) : ''}</small></td><td>${esc(client(f.clientId).name)}</td><td>${filingChip(f)}</td><td class="n">${inr(num(f.fee))}</td><td class="n ${lateFee(f) ? 't-bad' : 't-muted'}">${lateFee(f) ? inr(lateFee(f)) : '·'}</td><td>${j ? billChip(j) : '<span class="t-muted">No job yet</span>'}</td></tr>`; }).join('')}
+        </tbody></table></div>` : empty('Nothing here', 'No filings match these filters.')}`;
+    }
+    return kpis + `<div class="card"><div class="card-h"><h2>${fyStr(y1)} filings</h2><span class="hint">Filings whose due date falls between 1 Apr ${y1} and 31 Mar ${y1 + 1}. Click any filing to update it.</span>${yearNav}</div>${tabs}${body}
+      <div class="card-b t-muted" style="font-size:12.5px">Due dates are the standard statutory dates (AGM by 30 Sep). Check the MCA, income-tax and GST portals for extensions. Late fees are estimates of what the client is running up: ₹100 a day per ROC form, ₹200 a day for TDS (section 234E) and GSTR-9, flat ₹5,000 for DIR-3 KYC and belated ITR.</div></div>`;
+  };
+
+  PAGES.growth = () => {
+    const fy = fyOf(), t = todayISO();
+    const target = num(S.settings.fyTarget);
+    setHead('Growth', `Revenue plan for FY ${fy.label}`, `<button class="btn" data-act="setTarget">Set FY target</button>`);
+    const billed = sum(S.invoices.filter((i) => inRange(i.date, fy)), (i) => i.fee);
+    const ready = sum(S.jobs.filter(readyToBill), (j) => j.fee);
+    const wip = sum(S.jobs.filter((j) => !isDone(j) && j.billing === 'Not billed'), (j) => j.fee);
+    const y1 = +fy.start.slice(0, 4);
+    const compPipe = sum(S.filings.filter((f) => inRange(f.due, { start: `${y1}-04-01`, end: `${y1 + 1}-03-31` }) && f.status !== 'Not applicable' && !f.jobId), (f) => f.fee);
+    // Recurring jobs still to come this FY (monthly/quarterly not yet opened)
+    const recurring = S.jobs.filter((j) => j.recurring && j.recurring !== 'none' && !j.nextId);
+    const monthsLeft = Math.max(0, Math.round((parseD(fy.end) - parseD(t)) / (864e5 * 30.4)));
+    const recurFuture = sum(recurring, (j) => num(j.fee) * (j.recurring === 'monthly' ? monthsLeft : j.recurring === 'quarterly' ? Math.floor(monthsLeft / 3) : 0));
+    const projected = billed + ready + wip + compPipe + recurFuture;
+    const gap = Math.max(0, target - projected);
+    const needPerMonth = monthsLeft ? Math.max(0, target - billed) / monthsLeft : 0;
+    const prog = target ? Math.min(1, billed / target) : 0;
+    const parts = [
+      { label: 'Billed so far', value: billed, color: 'var(--chart-1)' },
+      { label: 'Finished, not invoiced', value: ready, color: 'var(--warn)' },
+      { label: 'Open jobs not yet billed', value: wip, color: 'var(--chart-2)' },
+      { label: 'Compliance filings not yet opened as jobs', value: compPipe, color: 'var(--chart-3)' },
+      { label: 'Recurring work still to come this FY', value: recurFuture, color: 'var(--info)' },
+    ];
+    const head = `<section class="kpis">
+      <div class="kpi"><span class="l">FY ${fy.label} target</span><span class="v">${inrC(target)}</span><span class="s">fees excl. GST</span></div>
+      <div class="kpi good"><span class="l">Billed so far</span><span class="v">${inrC(billed)}</span><span class="s">${pct(prog)} of target</span></div>
+      <div class="kpi"><span class="l">Projected for the year</span><span class="v">${inrC(projected)}</span><span class="s">if the pipeline below is billed</span></div>
+      <div class="kpi ${gap ? 'alert' : 'good'}"><span class="l">${gap ? 'Gap to target' : 'Target covered'}</span><span class="v">${inrC(gap)}</span><span class="s">${inr(needPerMonth)} a month needed for ${monthsLeft} months</span></div>
+    </section>`;
+    const bar = `<div class="card"><div class="card-h"><h2>Where this year’s revenue comes from</h2><span class="hint">Fees excluding GST and reimbursements</span></div><div class="card-b">
+      <div class="stack">${parts.map((p) => `<i style="width:${target || projected ? (p.value / Math.max(target, projected)) * 100 : 0}%;background:${p.color}" title="${esc(p.label)}: ${esc(inr(p.value))}"></i>`).join('')}${target > projected ? `<i class="gap" style="width:${((target - projected) / target) * 100}%" title="Gap"></i>` : ''}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:14px">${parts.map((p) => `<div class="sumline" style="padding:2px 0"><span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${p.color};margin-right:6px"></i>${esc(p.label)}</span><b class="num" style="font-weight:500">${inr(p.value)}</b></div>`).join('')}</div></div></div>`;
+
+    // Opportunities
+    const ops = [];
+    const readyJobs = S.jobs.filter(readyToBill);
+    if (readyJobs.length) ops.push({ kind: 'Bill now', value: ready, text: `${readyJobs.length} finished jobs have no invoice. Raise them this week.`, link: '#jobs', act: 'jobsReady' });
+    const owed = S.invoices.map((i) => ({ i, st: invStats(i) })).filter((x) => x.st.balance > 0 && x.st.daysOver > 30);
+    if (owed.length) ops.push({ kind: 'Collect', value: sum(owed, (x) => x.st.balance), text: `${owed.length} invoice${owed.length === 1 ? ' is' : 's are'} more than 30 days late: ${[...new Set(owed.map((x) => client(x.i.clientId).name.split(' (')[0]))].slice(0, 3).join(', ')}.`, link: '#invoices' });
+    const roc = ['AOC4', 'MGT7', 'ADT1', 'DIR3', 'AGM'];
+    S.clients.filter((c) => c.type === 'Company').forEach((c) => {
+      const miss = roc.filter((code) => !(c.filingCodes || []).includes(code));
+      if (miss.length >= 3) ops.push({ kind: 'Offer ROC retainer', value: sum(miss, (code) => FIL[code].fee), text: `${c.name}: you don’t handle ${miss.map((m) => FIL[m].short).join(', ')}. Offer the full annual company compliance package.`, link: '#client/' + c.id });
+    });
+    S.clients.filter((c) => c.type === 'LLP').forEach((c) => {
+      const miss = ['F8', 'F11', 'DIR3', 'ITRLLP'].filter((code) => !(c.filingCodes || []).includes(code));
+      if (miss.length >= 2) ops.push({ kind: 'Offer LLP package', value: sum(miss, (code) => FIL[code].fee), text: `${c.name}: add ${miss.map((m) => FIL[m].short).join(', ')} to your yearly work.`, link: '#client/' + c.id });
+    });
+    const gstClients = [...new Set(S.jobs.filter((j) => /GST return/i.test(j.service || '') || /GST return/i.test(j.title)).map((j) => j.clientId))];
+    gstClients.forEach((cid) => { const c = byId(S.clients, cid); if (c && !(c.filingCodes || []).includes('GSTR9') && !S.jobs.some((j) => j.clientId === cid && /GSTR-9/i.test(j.title + j.service))) ops.push({ kind: 'Add GSTR-9', value: FIL.GSTR9.fee, text: `${c.name} files monthly GST with you but has no GSTR-9 job. Due 31 Dec.`, link: '#client/' + cid }); });
+    const svc = {};
+    S.jobs.filter((j) => isDone(j) && num(j.fee) > 0).forEach((j) => { const s = jobStats(j); const k = j.service || 'Other'; const o = svc[k] || (svc[k] = { fee: 0, cost: 0, n: 0 }); o.fee += s.fee; o.cost += s.cost; o.n++; });
+    Object.entries(svc).filter(([, o]) => o.fee && (o.fee - o.cost) / o.fee < 0.3 && o.n >= 1).forEach(([k, o]) => ops.push({ kind: 'Reprice', value: Math.round(o.cost / 0.7 - o.fee), text: `${k}: margin is ${pct((o.fee - o.cost) / o.fee)} on ${o.n} job${o.n > 1 ? 's' : ''}. Raising fees to a 30% margin adds about this much on the same work.`, link: '#reports' }));
+    const noRecur = S.clients.filter((c) => S.jobs.some((j) => j.clientId === c.id) && !S.jobs.some((j) => j.clientId === c.id && j.recurring && j.recurring !== 'none') && !(c.filingCodes || []).length);
+    if (noRecur.length) ops.push({ kind: 'Convert to retainer', value: noRecur.length * 12 * 1500, text: `${noRecur.length} clients only give you one-off work (${noRecur.slice(0, 4).map((c) => c.name.split(' (')[0]).join(', ')}${noRecur.length > 4 ? '…' : ''}). A monthly GST or bookkeeping retainer at ₹1,500 is worth ₹18,000 a year each.`, link: '#clients' });
+    ops.sort((a, b) => b.value - a.value);
+    const opsCard = `<div class="card"><div class="card-h"><h2>Ways to earn more this year</h2><span class="hint">Worked out from your jobs, invoices and compliance list</span></div>
+      ${ops.length ? `<ul class="att">${ops.map((o) => `<li><span class="chip acc plain" style="min-width:130px;justify-content:center">${esc(o.kind)}</span><div class="what">${esc(o.text)}</div><span class="amt"><b style="font-weight:600">${inr(o.value)}</b></span><a class="btn sm" href="${o.link}" ${o.act ? `data-act="${o.act}"` : ''}>Open</a></li>`).join('')}</ul>` : empty('No suggestions yet', 'Add jobs, invoices and compliance profiles to see opportunities.')}</div>`;
+
+    // Retainer value per client
+    const ret = S.clients.map((c) => {
+      const comp = sum((c.filingCodes || []).map((code) => FIL[code]), (f) => f ? f.fee * (f.kind === 'tdsq' ? 4 : 1) : 0);
+      const rec = sum(S.jobs.filter((j) => j.clientId === c.id && j.recurring && j.recurring !== 'none' && !j.nextId), (j) => num(j.fee) * (j.recurring === 'monthly' ? 12 : j.recurring === 'quarterly' ? 4 : 1));
+      const billedFY = sum(S.invoices.filter((i) => i.clientId === c.id && inRange(i.date, fy)), (i) => i.fee);
+      return { c, comp, rec, total: comp + rec, billedFY };
+    }).filter((r) => r.total || r.billedFY).sort((a, b) => b.billedFY + b.total - a.billedFY - a.total).slice(0, 15);
+    const retCard = `<div class="card"><div class="card-h"><h2>Client value</h2><span class="hint">Billed this FY, and the yearly value of their compliance and recurring work: the basis for an annual retainer quote</span></div>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Client</th><th class="n">Billed FY ${fy.label}</th><th class="n">Compliance a year</th><th class="n">Recurring a year</th><th class="n">Retainer value</th></tr></thead><tbody>
+      ${ret.map((r) => `<tr class="click" data-href="#client/${r.c.id}"><td>${esc(r.c.name)}<small>${esc(r.c.type || '')}</small></td><td class="n">${inr(r.billedFY)}</td><td class="n">${r.comp ? inr(r.comp) : '·'}</td><td class="n">${r.rec ? inr(r.rec) : '·'}</td><td class="n"><b style="font-weight:500">${r.total ? inr(r.total) : '·'}</b>${r.total ? `<small>${inr(r.total / 12)} / month</small>` : ''}</td></tr>`).join('')}
+      </tbody></table></div></div>`;
+    return head + bar + opsCard + retCard;
+  };
+
   PAGES.team = () => {
     setHead('Team & services', 'Who does the work, what their time costs, and your standard fees', `<button class="btn" data-act="newService">New service</button> <button class="btn primary" data-act="newMember">New team member</button>`);
     return `<div class="card"><div class="card-h"><h2>Team</h2><span class="hint">Cost rate drives job costing. Bill rate is what an hour is worth to a client.</span></div>
@@ -743,7 +966,7 @@
           <div class="field full"><label for="set-address">Address</label><textarea class="input" id="set-address" name="address">${esc(s.address || '')}</textarea></div>
           ${f('gstRate', 'GST rate on fees (%)', 'number', 'min="0" step="0.01"')}${f('invoiceDueDays', 'Invoice due in (days)', 'number', 'min="0"')}
           ${f('defaultCostRate', 'Default cost rate per hour (₹)', 'number', 'min="0"')}${f('capacityHours', 'Default hours per person per month', 'number', 'min="1"')}
-          ${f('invoicePrefix', 'Invoice number prefix')}${f('jobPrefix', 'Job code prefix')}
+          ${f('fyTarget', 'Fee target for this FY (₹)', 'number', 'min="0"')}${f('invoicePrefix', 'Invoice number prefix')}${f('jobPrefix', 'Job code prefix')}
           <div class="field"><label for="set-fyStartMonth">Financial year starts in</label><select class="input" id="set-fyStartMonth" name="fyStartMonth">${MONTHS.map((m, i) => `<option value="${i + 1}" ${num(s.fyStartMonth) === i + 1 ? 'selected' : ''}>${m}</option>`).join('')}</select></div>
           <div class="field"><label for="set-theme">Appearance</label><select class="input" id="set-theme" data-change="theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         </div><div class="modal-f"><button class="btn primary" type="submit">Save settings</button></div></form>
@@ -1021,6 +1244,64 @@
     });
   }
 
+  function filingForm(f) {
+    const def = FIL[f.code] || { name: f.code, short: f.code };
+    const j = f.jobId ? job(f.jobId) : null;
+    const lf = lateFee(f);
+    form({
+      title: `${def.short} · ${client(f.clientId).name}`,
+      intro: `${esc(def.name)} for <b>${esc(f.period)}</b>, due ${fmtD(f.due)}.${lf ? ` <span class="t-bad">Overdue: client late fee so far about ${inr(lf)}.</span>` : ''}${j ? ` Billing job: <a href="#job/${j.id}">${esc(j.code)}</a> (${esc(j.billing)}).` : ''}`,
+      values: { ...f, makeJob: false },
+      fields: [
+        { name: 'status', label: 'Status', type: 'select', options: FILING_STATUS },
+        { name: 'filedOn', label: 'Filed on', type: 'date' },
+        { name: 'srn', label: 'SRN / acknowledgement no.', placeholder: 'e.g. AB1234567' },
+        { name: 'due', label: 'Due date', type: 'date', required: true },
+        { name: 'fee', label: 'Your fee (₹, excl. GST)', type: 'number', min: 0 },
+        { name: 'govtFee', label: 'Govt / late fee paid for client (₹)', type: 'number', min: 0, help: 'Recovered at cost on the invoice' },
+        { name: 'notes', label: 'Notes', type: 'textarea', full: true },
+        ...(j ? [] : [{ name: 'makeJob', label: 'Billing', type: 'checkbox', text: 'Open a job for this filing now (it is created automatically when you mark it filed)', full: true }]),
+      ],
+      submit: 'Save filing',
+      onSave: (d) => {
+        const mk = d.makeJob; delete d.makeJob;
+        if (d.status === 'Filed' && !d.filedOn) d.filedOn = todayISO();
+        if (d.status !== 'Filed') d.filedOn = d.filedOn || null;
+        Object.assign(f, d);
+        if (mk || (d.status === 'Filed' && num(f.fee) > 0) || (f.jobId && job(f.jobId))) jobForFiling(f);
+        toast(d.status === 'Filed' ? (num(f.fee) ? 'Filed — added to Ready to bill' : 'Marked filed') : 'Filing saved');
+        return true;
+      },
+      onDelete: () => { S.filings = S.filings.filter((x) => x.id !== f.id); toast('Filing removed'); },
+    });
+  }
+
+  function profileForm(clientId) {
+    const cands = S.clients.slice().sort((a, b) => a.name.localeCompare(b.name));
+    if (!cands.length) { toast('Add a client first'); return; }
+    const y1 = UI.comp.y1 || +fyOf().start.slice(0, 4);
+    const cats = ['ROC / MCA', 'Income tax', 'TDS', 'GST'];
+    const body = `<div class="modal-b">
+      <div class="field full"><label for="pf-client">Client</label><select class="input" id="pf-client">${cands.map((c) => `<option value="${c.id}" ${c.id === clientId ? 'selected' : ''}>${esc(c.name)} (${esc(c.type || '—')})</option>`).join('')}</select></div>
+      <div class="field full"><label>Filings you handle for this client every year</label><div id="pf-codes" class="pick"></div><span class="help">Filings that usually apply to the client’s type are marked. Fees are your standard rates and can be changed on each filing.</span></div></div>`;
+    modal('Compliance set-up', body, `<button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="saveProfile">Save and generate ${fyStr(y1)} filings</button>`, { wide: true });
+    const draw = () => {
+      const c = byId(S.clients, $('#pf-client').value);
+      $('#pf-codes').innerHTML = cats.map((cat) => `<div style="padding:8px 12px 2px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)">${cat}</div>` + FILINGS.filter((f) => f.cat === cat).map((f) => {
+        const fits = f.applies.includes('Any') || f.applies.includes(c.type);
+        return `<label><input type="checkbox" value="${f.code}" ${(c.filingCodes || []).includes(f.code) ? 'checked' : ''}><span>${esc(f.name)}${fits ? ' <span class="chip acc plain" style="font-size:10.5px">usual for ' + esc(c.type || 'this client') + '</span>' : ''}<br><small class="t-muted">${f.kind === 'tdsq' ? '4 quarterly returns a year' : 'Due ' + fmtDs(`${y1}-${f.md}`)}</small></span><b class="num">${inr(f.fee)}${f.kind === 'tdsq' ? '/qtr' : ''}</b></label>`;
+      }).join('')).join('');
+    };
+    $('#pf-client').addEventListener('change', draw); draw();
+    ACT.saveProfile = () => {
+      const c = byId(S.clients, $('#pf-client').value);
+      c.filingCodes = $$('#pf-codes input:checked').map((x) => x.value);
+      const n = generateFilings(y1, c.id);
+      closeModal(); toast(`${c.name}: ${c.filingCodes.length} filing types, ${n} new filings for ${fyStr(y1)}`); S.started = true;
+      if (!location.hash.startsWith('#compliance')) location.hash = '#compliance'; commit();
+    };
+  }
+
   function confirmBox(title, text, okLabel, onOk, typed) {
     modal(title, `<div class="modal-b"><div class="field full"><p style="margin:0">${text}</p>${typed ? `<input class="input" id="confirm-typed" placeholder="Type ${esc(typed)} to confirm" style="margin-top:12px">` : ''}</div></div>`,
       `<button class="btn" data-act="close">Cancel</button><button class="btn danger" data-act="confirmOk">${esc(okLabel)}</button>`);
@@ -1032,13 +1313,14 @@
     const te = S.time.filter((t) => t.jobId === id).length;
     confirmBox('Delete this job?', `“${esc(j.title)}” and its ${te} time entr${te === 1 ? 'y' : 'ies'} will be removed. Invoices stay.`, 'Delete job', () => {
       S.jobs = S.jobs.filter((x) => x.id !== id); S.time = S.time.filter((t) => t.jobId !== id);
+      S.filings.forEach((f) => { if (f.jobId === id) f.jobId = null; });
       S.invoices.forEach((i) => { i.jobIds = i.jobIds.filter((x) => x !== id); });
       location.hash = '#jobs'; toast('Job deleted');
     });
   }
   function deleteClient(id) {
     const c = byId(S.clients, id); if (!c) return;
-    const nj = S.jobs.filter((j) => j.clientId === id).length, ni = S.invoices.filter((i) => i.clientId === id).length;
+    const nj = S.jobs.filter((j) => j.clientId === id).length + S.filings.filter((f) => f.clientId === id).length, ni = S.invoices.filter((i) => i.clientId === id).length;
     if (nj || ni) { closeModal(); toast(`${c.name} has ${nj} jobs and ${ni} invoices. Delete those first.`); return; }
     confirmBox('Delete this client?', `“${esc(c.name)}” will be removed.`, 'Delete client', () => { S.clients = S.clients.filter((x) => x.id !== id); location.hash = '#clients'; toast('Client deleted'); });
   }
@@ -1081,9 +1363,24 @@
     let d;
     try { d = JSON.parse(text); } catch (e) { toast('That file is not valid JSON'); return; }
     if (!d || typeof d !== 'object' || !Array.isArray(d.jobs) || !Array.isArray(d.clients)) { toast('This does not look like a Cloudbook Desk backup'); return; }
-    confirmBox('Replace all data?', `The import has ${d.clients.length} clients, ${d.jobs.length} jobs, ${(d.invoices || []).length} invoices and ${(d.time || []).length} time entries. Everything currently in this browser will be replaced.`, 'Import and replace', () => {
-      S = migrate(d); S.started = true; delete S.exportedAt; delete S.app; location.hash = '#dashboard'; toast('Data imported');
-    });
+    const hasData = S.jobs.length || S.clients.length || S.invoices.length;
+    const counts = `${d.clients.length} clients, ${d.jobs.length} jobs, ${(d.invoices || []).length} invoices, ${(d.filings || []).length} filings and ${(d.time || []).length} time entries`;
+    modal('Import data', `<div class="modal-b"><div class="field full"><p style="margin:0">The file has ${counts}.</p>
+      ${hasData ? '<p class="t-muted" style="margin:10px 0 0"><b>Add new items</b> keeps everything you already have and adds only records that are not in this browser yet. <b>Replace</b> wipes this browser and loads the file exactly.</p>' : ''}</div></div>`,
+      `<button class="btn" data-act="close">Cancel</button>${hasData ? '<button class="btn danger" data-act="importReplace">Replace everything</button><button class="btn primary" data-act="importMerge">Add new items</button>' : '<button class="btn primary" data-act="importReplace">Import</button>'}`);
+    ACT.importReplace = () => { S = migrate(d); S.started = true; delete S.exportedAt; delete S.app; closeModal(); location.hash = '#dashboard'; toast('Data imported'); commit(); };
+    ACT.importMerge = () => {
+      const m = migrate(JSON.parse(JSON.stringify(d))); let added = 0;
+      ['clients', 'services', 'team', 'jobs', 'time', 'invoices', 'filings'].forEach((k) => {
+        const have = new Set(S[k].map((x) => x.id));
+        const keys = k === 'filings' ? new Set(S.filings.map((x) => x.key)) : null;
+        m[k].forEach((x) => { if (!have.has(x.id) && !(keys && keys.has(x.key))) { S[k].push(x); added++; } });
+      });
+      m.clients.forEach((c) => { const mine = byId(S.clients, c.id); if (mine) mine.filingCodes = [...new Set([...(mine.filingCodes || []), ...(c.filingCodes || [])])]; });
+      Object.keys(m.settings).forEach((k) => { if (S.settings[k] == null || S.settings[k] === '') S.settings[k] = m.settings[k]; });
+      S.seq.job = Math.max(S.seq.job || 0, m.seq.job || 0); S.started = true;
+      closeModal(); toast(`${added} new records added`); location.hash = '#dashboard'; commit();
+    };
   }
   function toCSV(cols, rows) {
     const q = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
@@ -1143,6 +1440,16 @@
     att: (d) => { UI.att = d.k; render(); },
     jobsReady: (d, el, e) => { e.preventDefault(); UI.jobs.status = 'ready'; location.hash = '#jobs'; },
     rtab: (d) => { UI.reports.tab = d.k; render(); },
+    filing: (d) => { const f = byId(S.filings, d.id); if (f) filingForm(f); },
+    compProfile: (d, el, e) => { if (e) e.preventDefault(); profileForm(d.id); },
+    compYear: (d) => { UI.comp.y1 += num(d.d); render(); },
+    compView: (d) => { UI.comp.view = d.k; render(); },
+    genFilings: () => {
+      const y1 = UI.comp.y1 || +fyOf().start.slice(0, 4);
+      if (!S.clients.some((c) => (c.filingCodes || []).length)) { profileForm(); return; }
+      const n = generateFilings(y1); toast(n ? `${n} filings added for ${fyStr(y1)}` : 'All filings for this year already exist'); commit();
+    },
+    setTarget: () => form({ title: 'Revenue target', values: { fyTarget: S.settings.fyTarget }, fields: [{ name: 'fyTarget', label: `Fee target for FY ${fyOf().label} (₹, excl. GST)`, type: 'number', min: 0, required: true, full: true }], onSave: (d) => { S.settings.fyTarget = num(d.fyTarget); toast('Target saved'); return true; } }),
     exportReport: () => { const t = reportTable(); const csv = toCSV(t.cols, t.total ? [...t.rows, t.total] : t.rows); const name = `cloudbook-${UI.reports.tab}-${todayISO()}.csv`; download(name, csv, 'text/csv'); toast('CSV exported'); },
     backup: () => { const txt = backupText(); download(`cloudbook-desk-backup-${todayISO()}.json`, txt, 'application/json'); S.settings.lastBackup = todayISO(); save(); toast('Backup downloaded'); render(); },
     copyBackup: () => { const txt = backupText(); S.settings.lastBackup = todayISO(); save(); showText('Backup text', txt); },
@@ -1151,7 +1458,9 @@
     goImport: () => { location.hash = '#settings'; },
     start: () => { S.started = true; location.hash = '#settings'; commit(); toast('Check your firm details, then add clients'); },
     demo: () => {
-      const go = () => { S = migrate(window.CB_DEMO ? window.CB_DEMO(blank, uid) : blank()); S.started = true; location.hash = '#dashboard'; commit(); toast('Sample data loaded'); };
+      const go = () => { S = migrate(window.CB_DEMO ? window.CB_DEMO(blank, uid) : blank()); S.started = true;
+        const y1 = +fyOf().start.slice(0, 4); generateFilings(y1); let k = 0;
+        S.filings.forEach((f) => { if (daysFrom(f.due) < -20 && (k++ % 4 !== 0)) { f.status = 'Filed'; f.filedOn = addDays(f.due, -3); f.srn = 'AB' + (4000000 + k * 137); } else if (daysFrom(f.due) < 25 && daysFrom(f.due) >= -20) f.status = 'In progress'; }); location.hash = '#dashboard'; commit(); toast('Sample data loaded'); };
       if (S.jobs.length || S.clients.length) { confirmBox('Replace your data with sample data?', 'Everything in this browser will be replaced with a sample firm. Download a backup first if you need it.', 'Load sample data', go); } else go();
     },
     wipe: () => confirmBox('Delete all data?', 'Every client, job, time entry and invoice in this browser will be deleted. This cannot be undone unless you have a backup.', 'Delete everything', () => { S = blank(); location.hash = '#dashboard'; toast('All data deleted'); }, 'DELETE'),
@@ -1179,7 +1488,8 @@
   document.addEventListener('change', (e) => {
     if (e.target.matches('select[data-filter], input[type=month][data-filter]')) return onFilter(e);
     const c = e.target.closest('[data-change]'); if (!c) return;
-    if (c.dataset.change === 'jobStatus') { const j = job(c.dataset.id); j.status = c.value; j.doneOn = j.status === DONE ? (j.doneOn || todayISO()) : null; toast(j.status === DONE && j.billing === 'Not billed' && num(j.fee) ? 'Marked done — ready to bill' : 'Status updated'); commit(); }
+    if (c.dataset.change === 'jobStatus') { const j = job(c.dataset.id); j.status = c.value; j.doneOn = j.status === DONE ? (j.doneOn || todayISO()) : null;
+      const fl = j.filingId ? byId(S.filings, j.filingId) : null; if (fl && j.status === DONE && fl.status !== 'Filed') { fl.status = 'Filed'; fl.filedOn = j.doneOn; } toast(j.status === DONE && j.billing === 'Not billed' && num(j.fee) ? 'Marked done — ready to bill' : 'Status updated'); commit(); }
     if (c.dataset.change === 'theme') { try { localStorage.setItem(THEME_KEY, c.value); } catch (err) { /* storage blocked */ } applyTheme(); }
     if (c.dataset.change === 'importFile') { const file = c.files[0]; if (!file) return; const r = new FileReader(); r.onload = () => doImport(String(r.result)); r.readAsText(file); c.value = ''; }
   });
@@ -1187,7 +1497,7 @@
     if (e.target.dataset.submit === 'settings') {
       e.preventDefault();
       const fd = new FormData(e.target);
-      fd.forEach((v, k) => { S.settings[k] = ['gstRate', 'invoiceDueDays', 'defaultCostRate', 'capacityHours', 'fyStartMonth'].includes(k) ? num(v) : String(v).trim(); });
+      fd.forEach((v, k) => { S.settings[k] = ['gstRate', 'invoiceDueDays', 'defaultCostRate', 'capacityHours', 'fyStartMonth', 'fyTarget'].includes(k) ? num(v) : String(v).trim(); });
       S.started = true; toast('Settings saved'); commit();
     }
     if (e.target.id === 'modal-form') { e.preventDefault(); ACT.formSave(); }
