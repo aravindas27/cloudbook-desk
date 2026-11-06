@@ -1,0 +1,6 @@
+# Never commit client data or backups
+*.json
+!package.json
+private/
+.DS_Store
+Thumbs.db
