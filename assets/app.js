@@ -3,6 +3,8 @@
    and can be exported/imported as a JSON backup from Settings & data. */
 (() => {
   'use strict';
+  // Refuse to run inside someone else's frame on the published site (GitHub Pages can't send frame headers).
+  if (window.top !== window.self && /(github\.io|cloudbookassociates\.com)$/i.test(location.hostname)) { document.documentElement.textContent = 'Open Cloudbook Desk directly in its own browser tab.'; return; }
 
   // ---------- Constants ----------
   const KEY = 'cloudbook-desk.v1';
@@ -109,17 +111,74 @@
     started: false,
   });
   let storageOk = true;
+  let loadError = false;
   function load() {
     try {
       const raw = localStorage.getItem(KEY);
-      if (raw) { S = migrate(JSON.parse(raw)); return; }
+      if (raw) {
+        try { S = migrate(JSON.parse(raw)); return; }
+        catch (err) { try { localStorage.setItem(KEY + '.unreadable-' + Date.now(), raw); } catch (e2) { /* storage full */ } loadError = true; }
+      }
     } catch (e) { storageOk = false; }
     S = blank();
   }
+  // ---------- Data validation ----------
+  // Every record is checked and coerced on load and import, so a damaged or tampered backup
+  // can neither inject markup (ids are restricted to safe characters) nor crash the app.
+  const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const okId = (v) => typeof v === 'string' && ID_RE.test(v);
+  const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
+  const COLLECTIONS = ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings', 'expenses'];
+  const REFS = { jobs: ['clientId', 'ownerId', 'invoiceId', 'nextId', 'filingId'], time: ['jobId', 'memberId'], invoices: ['clientId'], filings: ['clientId', 'jobId'], expenses: ['clientId', 'jobId', 'invoiceId', 'filingId'] };
+  const TEXT = ['name', 'title', 'period', 'service', 'notes', 'description', 'ref', 'number', 'code', 'category', 'paidBy', 'mode', 'role', 'contact', 'phone', 'email', 'gstin', 'pan', 'city', 'type', 'srn', 'key', 'note', 'priority', 'recurring'];
+  const NUMS = ['fee', 'budgetHours', 'govtFees', 'govtFee', 'hours', 'costRate', 'billRate', 'capacity', 'amount', 'tds', 'gst', 'reimb', 'total'];
+  const DATES = ['date', 'due', 'start', 'doneOn', 'dueDate', 'filedOn', 'created'];
+  // Returns a list of problems that make a file unsafe to import (bad ids or references).
+  function unsafeIds(d) {
+    const bad = [];
+    COLLECTIONS.forEach((k) => (Array.isArray(d[k]) ? d[k] : []).forEach((r, n) => {
+      if (!isObj(r)) return;
+      if (!okId(r.id)) bad.push(`${k}[${n}].id`);
+      (REFS[k] || []).forEach((f) => { if (r[f] != null && r[f] !== '' && !okId(r[f])) bad.push(`${k}[${n}].${f}`); });
+      if (k === 'invoices') { (Array.isArray(r.jobIds) ? r.jobIds : []).forEach((x) => { if (!okId(x)) bad.push(`${k}[${n}].jobIds`); }); (Array.isArray(r.payments) ? r.payments : []).forEach((p) => { if (isObj(p) && !okId(p.id)) bad.push(`${k}[${n}].payments`); }); }
+    }));
+    return bad;
+  }
+  function cleanRecord(r, k) {
+    const o = Object.create(null);
+    Object.keys(r).forEach((key) => {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') return;
+      const v = r[key];
+      if (Array.isArray(v)) { o[key] = v; return; }
+      if (v !== null && typeof v === 'object') return;
+      if (TEXT.includes(key)) o[key] = v == null ? '' : String(v);
+      else if (NUMS.includes(key)) o[key] = num(v);
+      else if (DATES.includes(key)) o[key] = typeof v === 'string' && DATE_RE.test(v) ? v : null;
+      else if ((REFS[k] || []).includes(key)) o[key] = okId(v) ? v : null;
+      else o[key] = v;
+    });
+    return Object.assign({}, o);
+  }
   function migrate(d) {
     const b = blank();
-    d.settings = Object.assign({}, b.settings, d.settings || {});
-    ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings', 'expenses'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
+    if (!isObj(d)) d = {};
+    const st = isObj(d.settings) ? d.settings : {};
+    const settings = {};
+    Object.keys(b.settings).forEach((k) => { const v = st[k]; settings[k] = typeof b.settings[k] === 'number' ? (v === '' || v == null || !isFinite(parseFloat(v)) ? b.settings[k] : num(v)) : (v == null ? b.settings[k] : String(v)); });
+    if (typeof st.lastBackup === 'string' && DATE_RE.test(st.lastBackup)) settings.lastBackup = st.lastBackup;
+    d.settings = settings;
+    COLLECTIONS.forEach((k) => {
+      const arr = Array.isArray(d[k]) ? d[k] : [];
+      d[k] = arr.filter((r) => isObj(r) && okId(r.id)).map((r) => cleanRecord(r, k));
+    });
+    d.jobs.forEach((j) => { if (!JOB_STATUS.includes(j.status)) j.status = 'Not started'; if (!BILLING.includes(j.billing)) j.billing = 'Not billed'; if (!RECUR.some((x) => x[0] === j.recurring)) j.recurring = 'none'; });
+    d.time = d.time.filter((t) => t.date && t.jobId);
+    d.invoices.forEach((i) => { if (!i.date) i.date = todayISO(); });
+    d.filings = d.filings.filter((f) => FIL[f.code]).map((f) => { if (!FILING_STATUS.includes(f.status)) f.status = 'Pending'; if (!f.due) f.due = todayISO(); return f; });
+    d.expenses.forEach((e) => { if (!e.date) e.date = todayISO(); e.recover = e.recover !== false; });
+    d.team.forEach((m) => { m.active = m.active !== false; });
+    if (!d.team.length) d.team = b.team;
     // Older versions kept "govt fees to recover" as a number on jobs and filings. Turn those into expense records once.
     d.jobs.forEach((j) => {
       if (num(j.govtFees) > 0 && !j.govtMigrated) {
@@ -133,9 +192,15 @@
         f.govtFee = 0;
       }
     });
-    d.clients.forEach((c) => { if (!Array.isArray(c.filingCodes)) c.filingCodes = []; });
-    d.seq = Object.assign({ job: 0, invoice: 0 }, d.seq || {});
-    d.invoices.forEach((i) => { if (!Array.isArray(i.payments)) i.payments = []; if (!Array.isArray(i.jobIds)) i.jobIds = []; });
+    d.clients.forEach((c) => { c.filingCodes = (Array.isArray(c.filingCodes) ? c.filingCodes : []).filter((x) => typeof x === 'string' && FIL[x]); });
+    const sq = isObj(d.seq) ? d.seq : {};
+    d.seq = { job: num(sq.job), invoice: num(sq.invoice) };
+    d.invoices.forEach((i) => {
+      i.payments = (Array.isArray(i.payments) ? i.payments : []).filter((p) => isObj(p) && okId(p.id)).map((p) => cleanRecord(p, 'payments'));
+      i.payments.forEach((p) => { if (!p.date) p.date = i.date; });
+      i.jobIds = (Array.isArray(i.jobIds) ? i.jobIds : []).filter(okId);
+    });
+    d.started = !!d.started;
     return d;
   }
   let saveTimer;
@@ -191,12 +256,47 @@
     return wb;
   }
   const xlsxBytes = () => window.XLSX.write(buildWorkbook(), { type: 'array', bookType: 'xlsx' });
-  function readExcelBackup(buf) {
-    const wb = window.XLSX.read(buf, { type: 'array' });
-    const ws = wb.Sheets._backup;
-    if (!ws) throw new Error('This Excel file has no Cloudbook Desk backup sheet. Use an Excel backup made by this app.');
-    const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
-    return rows.slice(1).map((r) => (r && r[0] != null ? String(r[0]) : '')).join('');
+  // Restore reads only the hidden "_backup" sheet with a small, strict ZIP/XML reader of our own,
+  // so a spreadsheet parser never runs on an untrusted file.
+  async function readExcelBackup(buf) {
+    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    if (u8.length > 30e6) throw new Error('That Excel file is too large to be a Cloudbook Desk backup.');
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error('This is not a valid .xlsx file.');
+    const count = dv.getUint16(eocd + 10, true); let p = dv.getUint32(eocd + 16, true);
+    const files = {};
+    for (let n = 0; n < count && n < 2000; n++) {
+      if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('This .xlsx file is damaged.');
+      const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), nlen = dv.getUint16(p + 28, true), xlen = dv.getUint16(p + 30, true), clen = dv.getUint16(p + 32, true), off = dv.getUint32(p + 42, true);
+      const name = new TextDecoder().decode(u8.subarray(p + 46, p + 46 + nlen));
+      files[name] = { method, csize, off };
+      p += 46 + nlen + xlen + clen;
+    }
+    const read = async (name) => {
+      const f = files[name]; if (!f) return null;
+      const lh = f.off, data = u8.subarray(lh + 30 + dv.getUint16(lh + 26, true) + dv.getUint16(lh + 28, true)).subarray(0, f.csize);
+      if (f.method === 0) return new TextDecoder().decode(data);
+      if (f.method !== 8 || typeof DecompressionStream !== 'function') throw new Error('This browser cannot read this Excel file. Use a JSON backup instead.');
+      const out = new Response(new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw')));
+      return out.text();
+    };
+    const unxml = (t) => t.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&#(\d+);/g, (m, d) => String.fromCodePoint(+d)).replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCodePoint(parseInt(h, 16))).replace(/&amp;/g, '&');
+    const texts = (xml) => [...xml.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)].map((m) => unxml(m[1])).join('');
+    const sstXml = await read('xl/sharedStrings.xml');
+    const sst = sstXml ? [...sstXml.matchAll(/<si>([\s\S]*?)<\/si>/g)].map((m) => texts(m[1])) : [];
+    for (const name of Object.keys(files).filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n))) {
+      const xml = await read(name);
+      const cells = [...xml.matchAll(/<c\s([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)].map((m) => {
+        const t = (/\st="(\w+)"/.exec(' ' + m[1]) || [])[1], body = m[2] || '';
+        if (t === 's') { const v = /<v>(\d+)<\/v>/.exec(body); return v ? sst[+v[1]] || '' : ''; }
+        if (t === 'inlineStr') return texts(body);
+        const v = /<v>([\s\S]*?)<\/v>/.exec(body); return v ? unxml(v[1]) : '';
+      });
+      if (cells.length && String(cells[0]).startsWith('cloudbook-desk-backup v1')) return cells.slice(1).join('');
+    }
+    throw new Error('This Excel file has no Cloudbook Desk backup sheet. Use an Excel backup made by this app.');
   }
   const xlsxName = (dated) => `Cloudbook-Desk-${dated ? todayISO() : 'latest'}.xlsx`;
   // Tiny IndexedDB store for the backup folder handle (handles can't go in localStorage).
@@ -220,7 +320,9 @@
     footStatus(); render();
   }
   async function writeAutoBackup() {
-    if (AB.state !== 'on' || !AB.dir || AB.busy) return;
+    if (AB.state !== 'on' || !AB.dir) return;
+    if (AB.busy) { scheduleAutoBackup(); return; }
+    if (!S.clients.length && !S.jobs.length && !S.invoices.length) return; // never overwrite a good backup with an empty one
     AB.busy = true;
     try {
       const bytes = xlsxBytes();
@@ -235,6 +337,15 @@
       console.error(e); AB.state = 'paused'; render();
     }
     AB.busy = false; footStatus();
+  }
+  // Before a replace or wipe, keep a one-off snapshot so the latest backup can't be lost.
+  async function snapshotBackup(label) {
+    if (AB.state !== 'on' || !AB.dir || (!S.clients.length && !S.jobs.length && !S.invoices.length)) return;
+    try {
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
+      const fh = await AB.dir.getFileHandle(`Cloudbook-Desk-${label}-${stamp}.xlsx`, { create: true });
+      const w = await fh.createWritable(); await w.write(xlsxBytes()); await w.close();
+    } catch (e) { console.error(e); }
   }
   function scheduleAutoBackup() { if (AB.state !== 'on') return; clearTimeout(AB.timer); AB.timer = setTimeout(writeAutoBackup, 3000); }
   function commit() { save(); render(); }
@@ -330,7 +441,7 @@
     const d = daysFrom(f.due);
     if (d < 0) return `<span class="chip bad">${short ? -d + 'd late' : 'Overdue · ' + -d + 'd'}</span>`;
     if (d <= 15) return `<span class="chip warn">${short ? 'Due ' + fmtDs(f.due) : 'Due in ' + d + 'd'}</span>`;
-    return `<span class="chip ${f.status === 'In progress' ? 'info' : ''}">${short ? fmtDs(f.due) : f.status + ' · ' + fmtDs(f.due)}</span>`;
+    return `<span class="chip ${f.status === 'In progress' ? 'info' : ''}">${short ? fmtDs(f.due) : esc(f.status) + ' · ' + fmtDs(f.due)}</span>`;
   }
   function generateFilings(y1, onlyClient) {
     let n = 0;
@@ -428,11 +539,13 @@
     const [r, id] = (location.hash.slice(1) || 'dashboard').split('/');
     const page = PAGES[r] || PAGES.dashboard;
     $$('.nav a[data-route]').forEach((a) => a.classList.toggle('active', a.dataset.route === r || (r === 'job' && a.dataset.route === 'jobs') || (r === 'client' && a.dataset.route === 'clients') || (r === 'invoice' && a.dataset.route === 'invoices')));
-    $('#brand-name').innerHTML = `${esc(shortFirm())}<small>Practice desk</small>`;
+    $('#brand-name').textContent = /cloudbook/i.test(S.settings.firmName || '') || !S.settings.firmName ? 'Practice desk' : S.settings.firmName;
+    try {
     const od = S.jobs.filter(isOverdue).length;
     const b = $('#nav-overdue'); b.hidden = !od; b.textContent = od;
     const xo = S.expenses.filter((e) => expToRecover(e) && daysFrom(e.date) < -30).length; const bx = $('#nav-exp'); if (bx) { bx.hidden = !xo; bx.textContent = xo; bx.title = 'Expenses unrecovered for over 30 days'; }
     const fo = S.filings.filter(filingOverdue).length; const bf = $('#nav-filings'); if (bf) { bf.hidden = !fo; bf.textContent = fo; }
+    } catch (e) { console.error(e); }
     let html = '';
     try { html = page(id); } catch (e) { console.error(e); html = `<div class="card card-b"><b>Something went wrong showing this page.</b><p class="t-muted">${esc(e.message)}</p></div>`; }
     view().innerHTML = banner() + html;
@@ -440,6 +553,7 @@
   }
   const shortFirm = () => (S.settings.firmName || 'Cloudbook Desk').replace(/\s+(LLP|Pvt\.? Ltd\.?|Private Limited)$/i, '');
   function banner() {
+    if (loadError) return '<div class="banner">Saved data in this browser could not be read, so the app started empty. A copy was kept. Restore your latest Excel or JSON backup from Settings &amp; data.</div>';
     if (!storageOk) return '<div class="banner">This browser is blocking storage, so changes will be lost when you close the page. Export a backup from Settings &amp; data.</div>';
     if (AB.state === 'paused') return '<div class="banner">Automatic Excel backup is paused until you allow it again (the browser asks once per visit). <button class="btn sm" data-act="resumeBackup">Resume Excel backup</button></div>';
     const last = S.settings.lastBackup;
@@ -551,7 +665,7 @@
     if (UI.att === 'ready') list = ready.sort((a, b) => num(b.fee) - num(a.fee)).slice(0, 8).map((j) => `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)}${j.doneOn ? ' · done ' + fmtDs(j.doneOn) : ''}</small></div><span class="amt">${inr(j.fee)}</span><button class="btn sm" data-act="newInvoice" data-client="${j.clientId}">Invoice</button></li>`).join('');
     if (UI.att === 'late') list = late.slice(0, 8).map((x) => `<li><div class="what"><a href="#invoice/${x.i.id}"><b>${esc(x.i.number)}</b></a><small>${esc(client(x.i.clientId).name)} · due ${fmtDs(x.i.dueDate)}</small></div><span class="amt">${inr(x.st.balance)}</span><span class="chip bad plain">${x.st.daysOver}d</span></li>`).join('');
     if (UI.att === 'filings') list = filOver.slice(0, 8).map((f) => `<li><div class="what"><a href="#compliance" data-act="filing" data-id="${f.id}"><b>${esc(FIL[f.code]?.name || f.code)}</b></a><small>${esc(client(f.clientId).name)} · ${esc(f.period)}</small></div>${lateFee(f) ? `<span class="amt t-bad">≈ ${inr(lateFee(f))}</span>` : ''}${filingChip(f, true)}</li>`).join('');
-    if (UI.att === 'exp') { const g = {}; S.expenses.filter(expToRecover).forEach((e) => { const o = g[e.clientId] || (g[e.clientId] = { n: 0, amt: 0, oldest: e.date }); o.n++; o.amt += num(e.amount); if (e.date < o.oldest) o.oldest = e.date; }); list = Object.entries(g).sort((a, b) => b[1].amt - a[1].amt).slice(0, 8).map(([cid, o]) => `<li><div class="what"><a href="#client/${cid}"><b>${esc(client(cid).name)}</b></a><small>${o.n} expense${o.n === 1 ? '' : 's'} · oldest ${fmtDs(o.oldest)}</small></div><span class="amt">${inr(o.amt)}</span><button class="btn sm" data-act="newInvoice" data-client="${cid}">Invoice</button></li>`).join(''); }
+    if (UI.att === 'exp') { const g = Object.create(null); S.expenses.filter(expToRecover).forEach((e) => { const o = g[e.clientId] || (g[e.clientId] = { n: 0, amt: 0, oldest: e.date }); o.n++; o.amt += num(e.amount); if (e.date < o.oldest) o.oldest = e.date; }); list = Object.entries(g).sort((a, b) => b[1].amt - a[1].amt).slice(0, 8).map(([cid, o]) => `<li><div class="what"><a href="#client/${cid}"><b>${esc(client(cid).name)}</b></a><small>${o.n} expense${o.n === 1 ? '' : 's'} · oldest ${fmtDs(o.oldest)}</small></div><span class="amt">${inr(o.amt)}</span><button class="btn sm" data-act="newInvoice" data-client="${cid}">Invoice</button></li>`).join(''); }
     if (UI.att === 'budget') list = overBudget.slice(0, 8).map((j) => { const s = jobStats(j); return `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)}</small></div><span class="amt t-bad">${hrs(s.hours)} / ${hrs(j.budgetHours)} h</span></li>`; }).join('');
     const att = `<div class="card"><div class="card-h"><h2>Needs your attention</h2></div>
       <div class="tabs" role="tablist">${tabs.map(([k, l, n]) => `<button class="${UI.att === k ? 'on' : ''}" data-act="att" data-k="${k}" role="tab" aria-selected="${UI.att === k}">${l}<span class="n">${n}</span></button>`).join('')}</div>
@@ -586,21 +700,22 @@
   };
 
   function welcome() {
-    return `<div class="card"><div class="card-b" style="padding:28px">
-      <h2 style="margin:0 0 6px;font-size:20px">Welcome to your practice desk</h2>
-      <p class="t-muted" style="max-width:62ch;margin:0 0 18px">Track every client job from start to cash: who is doing it, when it is due, the hours spent, what it cost, what you billed and what is still unpaid. Start with sample data to look around, or begin with your own clients.</p>
+    return `<div class="card welcome"><div class="card-b" style="padding:32px">
+      <div class="eyebrow">${esc(S.settings.firmName)}</div>
+      <h2 style="margin:6px 0 8px;font-size:24px;letter-spacing:-.02em">Your practice, from first call to cash in the bank</h2>
+      <p class="t-muted" style="max-width:60ch;margin:0 0 22px">Track every client job and statutory filing, the hours it took, what it cost, what you billed and what is still unpaid. Start with sample data to look around, or begin with your own clients.</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn primary" data-act="start">Start with my own data</button>
         <button class="btn" data-act="demo">Explore with sample data</button>
-        <button class="btn" data-act="goImport">Import a backup file</button>
-      </div>
-      <ol class="t-muted" style="margin:22px 0 0;padding-left:18px;line-height:1.9">
-        <li>Check your firm details and team cost rates under <a href="#settings">Settings</a> and <a href="#team">Team &amp; services</a>.</li>
-        <li>Add your <a href="#clients">clients</a>.</li>
-        <li>Open a <b>job</b> for each piece of work, with its fee, due date and budget hours.</li>
-        <li><b>Log time</b> as you work. Job cost and margin update by themselves.</li>
-        <li>When a job is done, <b>raise the invoice</b> and record payments as they come in.</li>
-      </ol></div></div>`;
+        <button class="btn" data-act="goImport">Restore a backup</button>
+      </div></div>
+      <div class="side"><b>Getting set up</b><ol style="margin:0;padding-left:18px;line-height:1.7">
+        <li>Firm details and cost rates in <a href="#settings">Settings</a> and <a href="#team">Team &amp; services</a></li>
+        <li>Add your <a href="#clients">clients</a> and the filings you handle for them</li>
+        <li>Open a job for each piece of work, log time as you go</li>
+        <li>Record expenses paid for clients</li>
+        <li>Raise invoices when work is done, record payments and TDS</li>
+        <li>Turn on automatic Excel backup</li></ol></div></div>`;
   }
 
   PAGES.jobs = () => {
@@ -877,7 +992,7 @@
         <div class="card"><div class="card-h"><h2>Invoices</h2></div>${invs.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${invs.map((i) => { const s = invStats(i); return `<tr class="click" data-href="#invoice/${i.id}"><td><b style="font-weight:500">${esc(i.number)}</b><small>${fmtD(i.date)}</small></td><td class="n">${inr(i.total)}</td><td>${invChip(s)}</td></tr>`; }).join('')}</tbody></table></div>` : empty('No invoices', 'Nothing billed yet.')}</div>
       </div>
       ${expCard(S.expenses.filter((e) => e.clientId === c.id), { client: c.id })}
-      <div class="card"><div class="card-h"><h2>Compliance</h2><span class="hint">${(c.filingCodes || []).length ? (c.filingCodes || []).map((x) => FIL[x]?.short || x).join(' · ') : 'No filings set up'}</span><span class="right"><button class="btn sm" data-act="compProfile" data-id="${c.id}">Set up filings</button></span></div>
+      <div class="card"><div class="card-h"><h2>Compliance</h2><span class="hint">${(c.filingCodes || []).length ? esc((c.filingCodes || []).map((x) => FIL[x]?.short || x).join(' · ')) : 'No filings set up'}</span><span class="right"><button class="btn sm" data-act="compProfile" data-id="${c.id}">Set up filings</button></span></div>
         ${(() => { const fs = S.filings.filter((f) => f.clientId === c.id).sort((a, b) => b.due.localeCompare(a.due)); return fs.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${fs.map((f) => `<tr class="click" data-act="filing" data-id="${f.id}"><td>${esc(FIL[f.code]?.name || f.code)}<small>${esc(f.period)}${f.srn ? ' · SRN ' + esc(f.srn) : ''}</small></td><td>${filingChip(f)}</td><td class="n">${inr(num(f.fee))}</td></tr>`).join('')}</tbody></table></div>` : empty('No filings yet', 'Set up the filings you handle for this client.'); })()}</div>
       <div><button class="btn danger" data-act="deleteClient" data-id="${c.id}">Delete client</button></div>`;
   };
@@ -902,7 +1017,7 @@
     const mCls = (r) => { const m = mPct(r); return m == null ? '' : m < 0 ? 't-bad' : m < 0.3 ? 't-warn' : ''; };
     if (R.tab === 'clients' || R.tab === 'services') {
       const key = R.tab === 'clients' ? (j) => client(j.clientId).name : (j) => j.service || 'Other';
-      const g = {};
+      const g = Object.create(null);
       jobsIn.forEach((j) => { const s = jobStats(j); const k = key(j); const o = g[k] || (g[k] = { name: k, jobs: 0, fee: 0, hours: 0, cost: 0, owed: 0 }); o.jobs++; o.fee += s.fee; o.hours += s.useHours; o.cost += s.cost; });
       if (R.tab === 'clients') S.invoices.forEach((i) => { const k = client(i.clientId).name; if (g[k]) g[k].owed += invStats(i).balance; });
       const rows = Object.values(g).map((o) => ({ ...o, margin: o.fee - o.cost, mpct: mPct(o), ph: o.hours ? o.fee / o.hours : null, avg: o.jobs ? o.fee / o.jobs : null })).sort((a, b) => b.fee - a.fee);
@@ -925,7 +1040,7 @@
     }
     if (R.tab === 'expenses') {
       const xs = S.expenses.filter((e) => inRange(e.date, range));
-      const g = {};
+      const g = Object.create(null);
       xs.forEach((e) => { const k = client(e.clientId).name; const o = g[k] || (g[k] = { name: k, n: 0, spent: 0, billed: 0, open: 0, absorbed: 0 }); o.n++; o.spent += num(e.amount); const st = expStatus(e); if (st === 'Billed') o.billed += num(e.amount); else if (st === 'Absorbed') o.absorbed += num(e.amount); else o.open += num(e.amount); });
       const rows = Object.values(g).sort((a, b) => b.spent - a.spent);
       const T = { name: 'Total', n: sum(rows, (r) => r.n), spent: sum(rows, (r) => r.spent), billed: sum(rows, (r) => r.billed), open: sum(rows, (r) => r.open), absorbed: sum(rows, (r) => r.absorbed) };
@@ -1055,7 +1170,7 @@
     });
     const gstClients = [...new Set(S.jobs.filter((j) => /GST return/i.test(j.service || '') || /GST return/i.test(j.title)).map((j) => j.clientId))];
     gstClients.forEach((cid) => { const c = byId(S.clients, cid); if (c && !(c.filingCodes || []).includes('GSTR9') && !S.jobs.some((j) => j.clientId === cid && /GSTR-9/i.test(j.title + j.service))) ops.push({ kind: 'Add GSTR-9', value: FIL.GSTR9.fee, text: `${c.name} files monthly GST with you but has no GSTR-9 job. Due 31 Dec.`, link: '#client/' + cid }); });
-    const svc = {};
+    const svc = Object.create(null);
     S.jobs.filter((j) => isDone(j) && num(j.fee) > 0).forEach((j) => { const s = jobStats(j); const k = j.service || 'Other'; const o = svc[k] || (svc[k] = { fee: 0, cost: 0, n: 0 }); o.fee += s.fee; o.cost += s.cost; o.n++; });
     Object.entries(svc).filter(([, o]) => o.fee && (o.fee - o.cost) / o.fee < 0.3 && o.n >= 1).forEach(([k, o]) => ops.push({ kind: 'Reprice', value: Math.round(o.cost / 0.7 - o.fee), text: `${k}: margin is ${pct((o.fee - o.cost) / o.fee)} on ${o.n} job${o.n > 1 ? 's' : ''}. Raising fees to a 30% margin adds about this much on the same work.`, link: '#reports' }));
     const noRecur = S.clients.filter((c) => S.jobs.some((j) => j.clientId === c.id) && !S.jobs.some((j) => j.clientId === c.id && j.recurring && j.recurring !== 'none') && !(c.filingCodes || []).length);
@@ -1102,7 +1217,7 @@
     const q = f.q.trim().toLowerCase();
     let rows = all.filter((e) => (!f.status || expStatus(e) === f.status) && (!f.client || e.clientId === f.client) && (!f.cat || e.category === f.cat) && (!q || (client(e.clientId).name + ' ' + (e.description || '') + ' ' + (e.ref || '') + ' ' + e.category).toLowerCase().includes(q)));
     rows = sortRows(rows, 'exp', { date: (e) => e.date, client: (e) => client(e.clientId).name, amount: (e) => num(e.amount), cat: (e) => e.category });
-    const byClient = {};
+    const byClient = Object.create(null);
     toRec.forEach((e) => { const o = byClient[e.clientId] || (byClient[e.clientId] = { n: 0, amt: 0 }); o.n++; o.amt += num(e.amount); });
     const recCard = Object.keys(byClient).length ? `<div class="card"><div class="card-h"><h2>To recover, by client</h2><span class="hint">Add these to the next invoice: they are your own cash</span></div><ul class="att">${Object.entries(byClient).sort((a, b) => b[1].amt - a[1].amt).map(([cid, o]) => `<li><div class="what"><a href="#client/${cid}"><b>${esc(client(cid).name)}</b></a><small>${o.n} expense${o.n === 1 ? '' : 's'}</small></div><span class="amt">${inr(o.amt)}</span><button class="btn sm" data-act="newInvoice" data-client="${cid}">Raise invoice</button></li>`).join('')}</ul></div>` : '';
     const table = `<div class="card"><div class="card-b"><div class="filters">
@@ -1543,13 +1658,15 @@
     confirmBox('Delete this job?', `“${esc(j.title)}” and its ${te} time entr${te === 1 ? 'y' : 'ies'} will be removed. Invoices stay.`, 'Delete job', () => {
       S.jobs = S.jobs.filter((x) => x.id !== id); S.time = S.time.filter((t) => t.jobId !== id);
       S.filings.forEach((f) => { if (f.jobId === id) f.jobId = null; });
+      S.jobs.forEach((x) => { if (x.nextId === id) x.nextId = null; });
+      S.expenses.forEach((e) => { if (e.jobId === id) e.jobId = null; });
       S.invoices.forEach((i) => { i.jobIds = i.jobIds.filter((x) => x !== id); });
       location.hash = '#jobs'; toast('Job deleted');
     });
   }
   function deleteClient(id) {
     const c = byId(S.clients, id); if (!c) return;
-    const nj = S.jobs.filter((j) => j.clientId === id).length + S.filings.filter((f) => f.clientId === id).length, ni = S.invoices.filter((i) => i.clientId === id).length;
+    const nj = S.jobs.filter((j) => j.clientId === id).length + S.filings.filter((f) => f.clientId === id).length + S.expenses.filter((e) => e.clientId === id).length, ni = S.invoices.filter((i) => i.clientId === id).length;
     if (nj || ni) { closeModal(); toast(`${c.name} has ${nj} jobs and ${ni} invoices. Delete those first.`); return; }
     confirmBox('Delete this client?', `“${esc(c.name)}” will be removed.`, 'Delete client', () => { S.clients = S.clients.filter((x) => x.id !== id); location.hash = '#clients'; toast('Client deleted'); });
   }
@@ -1592,12 +1709,15 @@
     let d;
     try { d = JSON.parse(text); } catch (e) { toast('That file is not valid JSON'); return; }
     if (!d || typeof d !== 'object' || !Array.isArray(d.jobs) || !Array.isArray(d.clients)) { toast('This does not look like a Cloudbook Desk backup'); return; }
+    const bad = unsafeIds(d);
+    if (bad.length) { toast(`Import stopped: the file has ${bad.length} invalid record id${bad.length === 1 ? '' : 's'} (e.g. ${bad[0]}). It may be damaged or tampered with.`); return; }
+    if (JSON.stringify(d).length > 20e6) { toast('Import stopped: the file is too large to be a Cloudbook Desk backup'); return; }
     const hasData = S.jobs.length || S.clients.length || S.invoices.length;
     const counts = `${d.clients.length} clients, ${d.jobs.length} jobs, ${(d.invoices || []).length} invoices, ${(d.filings || []).length} filings, ${(d.expenses || []).length} expenses and ${(d.time || []).length} time entries`;
     modal('Import data', `<div class="modal-b"><div class="field full"><p style="margin:0">The file has ${counts}.</p>
       ${hasData ? '<p class="t-muted" style="margin:10px 0 0"><b>Add new items</b> keeps everything you already have and adds only records that are not in this browser yet. <b>Replace</b> wipes this browser and loads the file exactly.</p>' : ''}</div></div>`,
       `<button class="btn" data-act="close">Cancel</button>${hasData ? '<button class="btn danger" data-act="importReplace">Replace everything</button><button class="btn primary" data-act="importMerge">Add new items</button>' : '<button class="btn primary" data-act="importReplace">Import</button>'}`);
-    ACT.importReplace = () => { S = migrate(d); S.started = true; delete S.exportedAt; delete S.app; closeModal(); location.hash = '#dashboard'; toast('Data imported'); commit(); };
+    ACT.importReplace = async () => { await snapshotBackup('before-replace'); S = migrate(d); S.started = true; delete S.exportedAt; delete S.app; closeModal(); location.hash = '#dashboard'; toast('Data imported'); commit(); };
     ACT.importMerge = () => {
       const m = migrate(JSON.parse(JSON.stringify(d))); let added = 0;
       ['clients', 'services', 'team', 'jobs', 'time', 'invoices', 'filings', 'expenses'].forEach((k) => {
@@ -1606,13 +1726,20 @@
         m[k].forEach((x) => { if (!have.has(x.id) && !(keys && keys.has(x.key))) { S[k].push(x); added++; } });
       });
       m.clients.forEach((c) => { const mine = byId(S.clients, c.id); if (mine) mine.filingCodes = [...new Set([...(mine.filingCodes || []), ...(c.filingCodes || [])])]; });
+      // Keep links consistent after merging: drop duplicate invoice numbers, re-mark billed jobs, clear dangling links.
+      const seen = new Map(); let dup = 0;
+      S.invoices = S.invoices.filter((i) => { const k = String(i.number).trim().toUpperCase(); if (seen.has(k) && seen.get(k) !== i.id) { dup++; return false; } seen.set(k, i.id); return true; });
+      S.invoices.forEach((i) => i.jobIds.forEach((jid) => { const j = job(jid); if (j) { j.billing = 'Billed'; j.invoiceId = i.id; } }));
+      S.expenses.forEach((e) => { if (e.invoiceId && !byId(S.invoices, e.invoiceId)) e.invoiceId = null; if (e.jobId && !job(e.jobId)) e.jobId = null; if (e.filingId && !byId(S.filings, e.filingId)) e.filingId = null; });
+      S.jobs.forEach((j) => { if (j.filingId && !byId(S.filings, j.filingId)) j.filingId = null; if (j.invoiceId && !byId(S.invoices, j.invoiceId)) { j.invoiceId = null; j.billing = 'Not billed'; } });
+      if (dup) added -= dup;
       Object.keys(m.settings).forEach((k) => { if (S.settings[k] == null || S.settings[k] === '') S.settings[k] = m.settings[k]; });
       S.seq.job = Math.max(S.seq.job || 0, m.seq.job || 0); S.started = true;
-      closeModal(); toast(`${added} new records added`); location.hash = '#dashboard'; commit();
+      closeModal(); toast(`${added} new records added${dup ? ` · ${dup} invoice${dup === 1 ? '' : 's'} skipped (number already exists)` : ''}`); location.hash = '#dashboard'; commit();
     };
   }
   function toCSV(cols, rows) {
-    const q = (v) => { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    const q = (v) => { let s = String(v ?? ''); if (typeof v === 'string' && /^[=+\-@\t\r]/.test(s)) s = "'" + s; return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
     return [cols.map((c) => q(c.label)).join(','), ...rows.map((r) => cols.map((c) => { const v = r[c.key]; return q(typeof v === 'number' ? round2(v) : v); }).join(','))].join('\n');
   }
 
@@ -1657,7 +1784,7 @@
     newInvoice: (d) => invoiceForm(null, { clientId: d.client, jobId: d.job }),
     editInvoice: (d) => invoiceForm(byId(S.invoices, d.id)),
     payment: (d) => paymentForm(byId(S.invoices, d.id)),
-    delPayment: (d) => { const i = byId(S.invoices, d.inv); i.payments = i.payments.filter((p) => p.id !== d.id); toast('Payment removed'); commit(); },
+    delPayment: (d) => { const i = byId(S.invoices, d.inv); const pm = i && i.payments.find((p) => p.id === d.id); if (!pm) return; confirmBox('Remove this payment?', `${inr(num(pm.amount) + num(pm.tds))} received on ${fmtD(pm.date)} will be removed from ${esc(i.number)}.`, 'Remove payment', () => { i.payments = i.payments.filter((p) => p.id !== d.id); toast('Payment removed'); }); },
     deleteInvoice: (d) => {
       const i = byId(S.invoices, d.id);
       confirmBox('Delete this invoice?', `${esc(i.number)} and its ${i.payments.length} payment record(s) will be removed. Its jobs go back to “Not billed”.`, 'Delete invoice', () => {
@@ -1713,7 +1840,7 @@
         S.filings.forEach((f) => { if (daysFrom(f.due) < -20 && (k++ % 4 !== 0)) { f.status = 'Filed'; f.filedOn = addDays(f.due, -3); f.srn = 'AB' + (4000000 + k * 137); } else if (daysFrom(f.due) < 25 && daysFrom(f.due) >= -20) f.status = 'In progress'; }); location.hash = '#dashboard'; commit(); toast('Sample data loaded'); };
       if (S.jobs.length || S.clients.length) { confirmBox('Replace your data with sample data?', 'Everything in this browser will be replaced with a sample firm. Download a backup first if you need it.', 'Load sample data', go); } else go();
     },
-    wipe: () => confirmBox('Delete all data?', 'Every client, job, time entry and invoice in this browser will be deleted. This cannot be undone unless you have a backup.', 'Delete everything', () => { S = blank(); location.hash = '#dashboard'; toast('All data deleted'); }, 'DELETE'),
+    wipe: () => confirmBox('Delete all data?', 'Every client, job, time entry and invoice in this browser will be deleted. This cannot be undone unless you have a backup.', 'Delete everything', async () => { await snapshotBackup('before-delete'); S = blank(); location.hash = '#dashboard'; toast('All data deleted'); commit(); }, 'DELETE'),
   };
 
   // ---------- Event wiring ----------
@@ -1743,7 +1870,7 @@
     if (c.dataset.change === 'theme') { try { localStorage.setItem(THEME_KEY, c.value); } catch (err) { /* storage blocked */ } applyTheme(); }
     if (c.dataset.change === 'importFile') {
       const file = c.files[0]; if (!file) return; const r = new FileReader();
-      if (/\.xlsx$/i.test(file.name)) { r.onload = () => { try { doImport(readExcelBackup(new Uint8Array(r.result))); } catch (err) { toast(err.message); } }; r.readAsArrayBuffer(file); }
+      if (/\.xlsx$/i.test(file.name)) { r.onload = async () => { try { doImport(await readExcelBackup(new Uint8Array(r.result))); } catch (err) { toast(err.message); } }; r.readAsArrayBuffer(file); }
       else { r.onload = () => doImport(String(r.result)); r.readAsText(file); }
       c.value = '';
     }

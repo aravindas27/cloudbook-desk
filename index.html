@@ -2,20 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'none'; manifest-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <title>Cloudbook Desk</title>
+  <title>Cloudbook Desk · Cloudbook Associates LLP</title>
   <meta name="description" content="Practice management for Cloudbook Associates LLP: jobs, timesheets, job costing, billing and collections.">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+  <link rel="icon" type="image/png" href="assets/icon-64.png">
+  <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+  <meta name="theme-color" content="#0b2c6e">
   <link rel="stylesheet" href="assets/app.css">
 </head>
 <body>
   <div class="app" id="app">
     <nav class="nav" id="nav" aria-label="Main">
       <div class="brand">
-        <div class="brand-mark">CB</div>
-        <div class="brand-name" id="brand-name">Cloudbook Desk<small>Practice management</small></div>
+        <div style="flex:1;min-width:0">
+          <img class="brand-logo light" src="assets/logo.png" alt="Cloudbook Associates LLP" width="398" height="101">
+          <img class="brand-logo dark" src="assets/logo-dark.png" alt="Cloudbook Associates LLP" width="398" height="101">
+          <div class="brand-sub" id="brand-name">Practice desk</div>
+        </div>
       </div>
       <a href="#dashboard" data-route="dashboard"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>Dashboard</a>
       <div class="nav-group">Work</div>
@@ -48,7 +53,7 @@
     </div>
   </div>
   <div id="modal-root"></div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script src="assets/vendor/xlsx.mini.min.js"></script>
   <script src="assets/demo-data.js"></script>
   <script src="assets/app.js"></script>
 </body>

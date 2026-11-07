@@ -4,3 +4,6 @@
 private/
 .DS_Store
 Thumbs.db
+*.xlsx
+*.csv
+Cloudbook-Desk-*

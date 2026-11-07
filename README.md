@@ -57,6 +57,16 @@ python3 -m http.server 8000
 - Take a backup every week from **Settings and data → Download backup**. Use the same file to move to another computer or browser (**Restore or import**).
 - Clearing browser data, or using a private window, removes what is stored in that browser. Keep backups.
 
+## Security
+
+- **No third-party requests.** Fonts (IBM Plex, SIL Open Font License) and the Excel writer (SheetJS 0.18.5, Apache 2.0) are hosted in this repository. A strict Content-Security-Policy allows scripts, styles, fonts and images only from the site itself, and blocks all network connections, so data cannot be sent anywhere even if something went wrong.
+- **Imports are validated.** Every record id must be plain letters, digits, `-` or `_`; files with anything else are refused. All fields are type-checked and unknown statuses or filing codes are dropped, so a damaged or tampered backup can neither inject code nor crash the app.
+- **Excel restore never runs a spreadsheet parser on your file.** It reads only the app's own hidden `_backup` sheet with a small built-in reader, which avoids the known file-parsing vulnerabilities in SheetJS 0.18.5 (CVE-2023-30533, CVE-2024-22363). SheetJS is used only to write backups.
+- **CSV exports** neutralise cells starting with `= + - @` so they can't run as formulas in Excel.
+- **Backups are protected from accidents.** Before "Replace everything" or "Delete all data", a snapshot is saved to the backup folder, and automatic backup never overwrites a good file with empty data.
+- **Your data stays on your computer**, in this browser's storage and your backup folder, unencrypted. Use the app only on your own computer account, lock your screen, and keep the backup folder private.
+- **Recommended:** turn on two-factor authentication on GitHub, and don't publish other GitHub Pages sites on the same account, because sites under `aravindas27.github.io` share browser storage. Better still, serve the app from its own subdomain (for example `desk.cloudbookassociates.com`).
+
 ## Getting started with real data
 
 1. Open the site and choose **Start with my own data**, or import the prepared file `cloudbook-desk-my-data.json` from **Settings and data → Restore or import**.
@@ -70,10 +80,13 @@ python3 -m http.server 8000
 ## Files
 
 ```
-index.html            App shell and navigation
-assets/app.css        Styles (light and dark themes)
-assets/app.js         Data store, calculations, pages and forms
+index.html            App shell, navigation and security policy
+assets/app.css        Styles (Cloudbook navy and slate, light and dark themes)
+assets/app.js         Data store, validation, calculations, pages and forms
 assets/demo-data.js   Fictional sample firm for exploring
+assets/logo*.png      Cloudbook Associates logo (light and dark)
+assets/fonts/         IBM Plex Sans and Mono (self-hosted)
+assets/vendor/        SheetJS for writing Excel backups
 ```
 
 ## Ideas for later
