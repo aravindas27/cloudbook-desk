@@ -143,9 +143,100 @@
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       try { localStorage.setItem(KEY, JSON.stringify(S)); storageOk = true; } catch (e) { storageOk = false; }
-      const f = $('#nav-foot'); if (f) f.textContent = storageOk ? 'Saved in this browser · ' + new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) : 'Not saved: browser storage is blocked';
+      footStatus();
+      scheduleAutoBackup();
     }, 150);
   }
+  function footStatus() {
+    const f = $('#nav-foot'); if (!f) return;
+    const t = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    f.textContent = !storageOk ? 'Not saved: browser storage is blocked' : AB.state === 'on' ? `Saved · Excel backup ${AB.lastAt ? AB.lastAt : 'on'}` : 'Saved in this browser · ' + t;
+  }
+
+  // ---------- Excel backup ----------
+  // Workbook with one readable sheet per table, plus a "_backup" sheet holding the full data
+  // so the same .xlsx file can be imported back.
+  const AB = { state: 'off', dir: null, timer: null, lastAt: null, busy: false };
+  function buildWorkbook() {
+    if (!window.XLSX) throw new Error('Excel library did not load. Check the internet connection and reload.');
+    const X = window.XLSX, wb = X.utils.book_new();
+    const add = (name, rows, widths) => { const ws = X.utils.json_to_sheet(rows.length ? rows : [{ Note: 'No records' }]); if (widths) ws['!cols'] = widths.map((w) => ({ wch: w })); X.utils.book_append_sheet(wb, ws, name); };
+    const fy = fyOf();
+    const invs = S.invoices.map((i) => ({ i, st: invStats(i) }));
+    add('Summary', [
+      { Item: 'Firm', Value: S.settings.firmName }, { Item: 'Backup taken', Value: new Date().toLocaleString('en-IN') },
+      { Item: 'Financial year', Value: 'FY ' + fy.label },
+      { Item: 'Fees billed this FY (excl. GST)', Value: round2(sum(S.invoices.filter((i) => inRange(i.date, fy)), (i) => i.fee)) },
+      { Item: 'Receivables', Value: round2(sum(invs, (x) => x.st.balance)) },
+      { Item: 'Finished work not invoiced', Value: round2(sum(S.jobs.filter(readyToBill), (j) => j.fee)) },
+      { Item: 'Expenses to recover', Value: round2(sum(S.expenses.filter(expToRecover), (e) => e.amount)) },
+      { Item: 'Overdue filings', Value: S.filings.filter(filingOverdue).length },
+      { Item: 'Clients / jobs / invoices / expenses / filings', Value: [S.clients.length, S.jobs.length, S.invoices.length, S.expenses.length, S.filings.length].join(' / ') },
+      { Item: 'To restore', Value: 'Cloudbook Desk → Settings & data → Restore or import → choose this .xlsx file' },
+    ], [44, 60]);
+    add('Clients', S.clients.map((c) => ({ Name: c.name, Type: c.type, Contact: c.contact, Phone: c.phone, Email: c.email, GSTIN: c.gstin, PAN: c.pan, City: c.city, 'Filings handled': (c.filingCodes || []).map((x) => FIL[x]?.short || x).join(', '), Notes: c.notes })), [36, 16, 22, 14, 26, 18, 12, 16, 40, 30]);
+    add('Jobs', S.jobs.map((j) => { const st = jobStats(j); const inv = j.invoiceId ? byId(S.invoices, j.invoiceId) : null; return { Code: j.code, Client: client(j.clientId).name, Job: j.title, Service: j.service, Period: j.period, Owner: member(j.ownerId)?.name || '', Start: j.start, Due: j.due, Status: j.status, 'Completed on': j.doneOn || '', 'Fee (excl GST)': num(j.fee), 'Budget hours': num(j.budgetHours), 'Hours logged': round2(st.hours), Cost: Math.round(st.cost), Margin: Math.round(st.margin), 'Margin %': st.marginPct == null ? '' : round2(st.marginPct * 100), 'Cost estimated': st.estimated ? 'Yes' : 'No', Billing: j.billing, Invoice: inv ? inv.number : '', Repeats: j.recurring, Notes: j.notes }; }), [9, 32, 40, 30, 16, 16, 11, 11, 16, 12, 12, 10, 10, 10, 10, 9, 10, 11, 13, 10, 30]);
+    add('Timesheet', S.time.slice().sort((a, b) => a.date.localeCompare(b.date)).map((e) => { const j = job(e.jobId); return { Date: e.date, Person: member(e.memberId)?.name || '', Client: j ? client(j.clientId).name : '', Job: j ? j.title : '(deleted)', Hours: num(e.hours), 'Cost / hour': rateOf(e), Cost: Math.round(num(e.hours) * rateOf(e)), 'Work done': e.note }; }), [11, 18, 32, 40, 7, 10, 10, 40]);
+    add('Invoices', invs.sort((a, b) => a.i.date.localeCompare(b.i.date)).map(({ i, st }) => ({ Number: i.number, Client: client(i.clientId).name, Date: i.date, Due: i.dueDate, 'Fee (excl GST)': num(i.fee), GST: num(i.gst), Reimbursements: num(i.reimb), Total: num(i.total), 'Received (bank)': round2(st.cash), 'TDS by client': round2(st.tds), Balance: st.balance, Status: st.status, Notes: i.notes })), [13, 32, 11, 11, 13, 10, 13, 11, 13, 11, 10, 10, 40]);
+    add('Payments', S.invoices.flatMap((i) => i.payments.map((p) => ({ Invoice: i.number, Client: client(i.clientId).name, Date: p.date, Mode: p.mode, Amount: num(p.amount), TDS: num(p.tds), Reference: p.ref }))).sort((a, b) => String(a.Date).localeCompare(String(b.Date))), [13, 32, 11, 14, 11, 9, 24]);
+    add('Expenses', S.expenses.slice().sort((a, b) => a.date.localeCompare(b.date)).map((e) => { const j = e.jobId ? job(e.jobId) : null; const inv = e.invoiceId ? byId(S.invoices, e.invoiceId) : null; return { Date: e.date, Client: client(e.clientId).name, Job: j ? j.title : '', Type: e.category, Description: e.description, 'Challan / SRN': e.ref, 'Paid from': e.paidBy, Amount: num(e.amount), 'Recover from client': e.recover ? 'Yes' : 'No', Status: expStatus(e), Invoice: inv ? inv.number : '', Notes: e.notes }; }), [11, 32, 32, 30, 40, 18, 18, 10, 10, 11, 13, 30]);
+    add('Filings', S.filings.slice().sort((a, b) => a.due.localeCompare(b.due)).map((f) => ({ Client: client(f.clientId).name, Filing: FIL[f.code]?.name || f.code, Period: f.period, Due: f.due, Status: filingOverdue(f) ? 'Overdue' : f.status, 'Filed on': f.filedOn || '', SRN: f.srn, Fee: num(f.fee), 'Late fee so far (est.)': lateFee(f), Notes: f.notes })), [32, 36, 18, 11, 12, 11, 14, 9, 12, 40]);
+    add('Team', S.team.map((m) => ({ Name: m.name, Role: m.role, 'Cost / hour': num(m.costRate), 'Bill rate / hour': num(m.billRate), 'Hours / month': num(m.capacity), Active: m.active === false ? 'No' : 'Yes' })), [20, 20, 11, 13, 12, 7]);
+    add('Services', S.services.map((x) => ({ Service: x.name, Category: x.category, Repeats: x.recurring, 'Standard fee': num(x.fee), 'Budget hours': num(x.hours) })), [40, 14, 10, 12, 12]);
+    const json = JSON.stringify({ ...S, exportedAt: new Date().toISOString(), app: 'cloudbook-desk' });
+    const chunks = []; for (let k = 0; k < json.length; k += 30000) chunks.push([json.slice(k, k + 30000)]);
+    const raw = X.utils.aoa_to_sheet([['cloudbook-desk-backup v1 — do not edit this sheet'], ...chunks]);
+    X.utils.book_append_sheet(wb, raw, '_backup');
+    wb.Workbook = { Sheets: wb.SheetNames.map((n) => ({ name: n, Hidden: n === '_backup' ? 1 : 0 })) };
+    return wb;
+  }
+  const xlsxBytes = () => window.XLSX.write(buildWorkbook(), { type: 'array', bookType: 'xlsx' });
+  function readExcelBackup(buf) {
+    const wb = window.XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets._backup;
+    if (!ws) throw new Error('This Excel file has no Cloudbook Desk backup sheet. Use an Excel backup made by this app.');
+    const rows = window.XLSX.utils.sheet_to_json(ws, { header: 1, raw: true });
+    return rows.slice(1).map((r) => (r && r[0] != null ? String(r[0]) : '')).join('');
+  }
+  const xlsxName = (dated) => `Cloudbook-Desk-${dated ? todayISO() : 'latest'}.xlsx`;
+  // Tiny IndexedDB store for the backup folder handle (handles can't go in localStorage).
+  const idb = (mode, fn) => new Promise((res, rej) => {
+    const req = indexedDB.open('cloudbook-desk', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('kv');
+    req.onerror = () => rej(req.error);
+    req.onsuccess = () => { const tx = req.result.transaction('kv', mode); const r = fn(tx.objectStore('kv')); tx.oncomplete = () => res(r && r.result); tx.onerror = () => rej(tx.error); };
+  });
+  const canAutoBackup = () => typeof window.showDirectoryPicker === 'function' && window.self === window.top;
+  async function initAutoBackup() {
+    if (!canAutoBackup()) { AB.state = 'unsupported'; return; }
+    try {
+      const h = await idb('readonly', (st) => st.get('backupDir'));
+      if (!h) { AB.state = 'off'; return; }
+      AB.dir = h;
+      const perm = await h.queryPermission({ mode: 'readwrite' });
+      AB.state = perm === 'granted' ? 'on' : 'paused';
+      try { AB.lastAt = localStorage.getItem('cloudbook-desk.autobackup.last'); } catch (e) { /* storage blocked */ }
+    } catch (e) { AB.state = 'off'; }
+    footStatus(); render();
+  }
+  async function writeAutoBackup() {
+    if (AB.state !== 'on' || !AB.dir || AB.busy) return;
+    AB.busy = true;
+    try {
+      const bytes = xlsxBytes();
+      for (const name of [xlsxName(false), xlsxName(true)]) {
+        const fh = await AB.dir.getFileHandle(name, { create: true });
+        const w = await fh.createWritable(); await w.write(bytes); await w.close();
+      }
+      AB.lastAt = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+      try { localStorage.setItem('cloudbook-desk.autobackup.last', AB.lastAt + ', ' + fmtDs(todayISO())); } catch (e) { /* storage blocked */ }
+      if (S.settings.lastBackup !== todayISO()) { S.settings.lastBackup = todayISO(); try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage blocked */ } }
+    } catch (e) {
+      console.error(e); AB.state = 'paused'; render();
+    }
+    AB.busy = false; footStatus();
+  }
+  function scheduleAutoBackup() { if (AB.state !== 'on') return; clearTimeout(AB.timer); AB.timer = setTimeout(writeAutoBackup, 3000); }
   function commit() { save(); render(); }
 
   // ---------- Lookups & calculations ----------
@@ -350,9 +441,10 @@
   const shortFirm = () => (S.settings.firmName || 'Cloudbook Desk').replace(/\s+(LLP|Pvt\.? Ltd\.?|Private Limited)$/i, '');
   function banner() {
     if (!storageOk) return '<div class="banner">This browser is blocking storage, so changes will be lost when you close the page. Export a backup from Settings &amp; data.</div>';
+    if (AB.state === 'paused') return '<div class="banner">Automatic Excel backup is paused until you allow it again (the browser asks once per visit). <button class="btn sm" data-act="resumeBackup">Resume Excel backup</button></div>';
     const last = S.settings.lastBackup;
-    const stale = S.started && (!last || daysFrom(last) < -7) && S.jobs.length > 0;
-    return stale ? `<div class="banner">Your data lives only in this browser. ${last ? 'Last backup ' + fmtD(last) + '.' : 'No backup taken yet.'} <button class="btn sm" data-act="backup">Back up now</button></div>` : '';
+    const stale = AB.state !== 'on' && S.started && (!last || daysFrom(last) < -7) && S.jobs.length > 0;
+    return stale ? `<div class="banner">Your data lives only in this browser. ${last ? 'Last backup ' + fmtD(last) + '.' : 'No backup taken yet.'} <button class="btn sm" data-act="backupXlsx">Download Excel backup</button>${canAutoBackup() ? ' <button class="btn sm" data-act="chooseBackupDir">Turn on automatic backup</button>' : ''}</div>` : '';
   }
   const empty = (title, text, action) => `<div class="empty"><b>${esc(title)}</b>${esc(text)}${action ? `<div style="margin-top:12px">${action}</div>` : ''}</div>`;
   const th = (key, label, tbl, cls = '') => {
@@ -1055,12 +1147,18 @@
           <div class="field"><label for="set-theme">Appearance</label><select class="input" id="set-theme" data-change="theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         </div><div class="modal-f"><button class="btn primary" type="submit">Save settings</button></div></form>
       <div style="display:flex;flex-direction:column;gap:18px">
-        <div class="card"><div class="card-h"><h2>Backup</h2><span class="hint">${s.lastBackup ? 'Last backup ' + fmtD(s.lastBackup) : 'No backup taken yet'}</span></div><div class="card-b">
-          <p class="t-muted" style="margin:0 0 12px">Everything is stored in this browser on this device. Download a backup at least once a week, and use it to move your data to another computer.</p>
-          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" data-act="backup">Download backup</button><button class="btn" data-act="copyBackup">Copy backup as text</button></div></div></div>
+        <div class="card"><div class="card-h"><h2>Automatic Excel backup</h2><span class="hint">${AB.state === 'on' ? '<span class="chip ok">On</span>' : AB.state === 'paused' ? '<span class="chip warn">Paused</span>' : AB.state === 'unsupported' ? '<span class="chip">Not available in this browser</span>' : '<span class="chip">Off</span>'}</span></div><div class="card-b">
+          ${AB.state === 'unsupported' ? '<p class="t-muted" style="margin:0">Automatic backup to a folder works in Google Chrome or Microsoft Edge on a computer. Here, use the Download Excel backup button below.</p>'
+          : AB.state === 'on' ? `<p style="margin:0 0 6px">Saving to folder <b>${esc(AB.dir?.name || '')}</b> about 3 seconds after every change.${AB.lastAt ? ' Last saved ' + esc(AB.lastAt) + '.' : ''}</p><p class="t-muted" style="margin:0 0 12px">Files: <span class="mono">Cloudbook-Desk-latest.xlsx</span> (always current) and one dated copy per day, e.g. <span class="mono">${xlsxName(true)}</span>. Pick a Google Drive or OneDrive folder and the backups also go to the cloud.</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="backupNow">Save backup now</button><button class="btn" data-act="chooseBackupDir">Change folder</button><button class="btn danger" data-act="stopBackup">Turn off</button></div>`
+          : AB.state === 'paused' ? `<p style="margin:0 0 12px">Folder <b>${esc(AB.dir?.name || '')}</b> is chosen, but the browser needs your permission again for this visit.</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" data-act="resumeBackup">Resume Excel backup</button><button class="btn" data-act="chooseBackupDir">Change folder</button><button class="btn danger" data-act="stopBackup">Turn off</button></div>`
+          : `<p class="t-muted" style="margin:0 0 12px">Choose a folder once, ideally inside Google Drive or OneDrive on this computer. After that, an Excel copy of all your data is saved there automatically every time you change something, plus one dated copy per day.</p><button class="btn primary" data-act="chooseBackupDir">Choose backup folder</button>`}
+        </div></div>
+        <div class="card"><div class="card-h"><h2>Download a backup</h2><span class="hint">${s.lastBackup ? 'Last backup ' + fmtD(s.lastBackup) : 'No backup taken yet'}</span></div><div class="card-b">
+          <p class="t-muted" style="margin:0 0 12px">The Excel file has one sheet each for clients, jobs, timesheet, invoices, payments, expenses, filings, team and services, and it can be imported back to restore everything.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" data-act="backupXlsx">Download Excel backup</button><button class="btn" data-act="backup">Download JSON backup</button><button class="btn" data-act="copyBackup">Copy backup as text</button></div></div></div>
         <div class="card"><div class="card-h"><h2>Restore or import</h2></div><div class="card-b">
-          <p class="t-muted" style="margin:0 0 12px">Choose a backup file (.json) made by this app. Importing replaces everything currently in this browser.</p>
-          <input type="file" id="import-file" accept=".json,application/json" data-change="importFile">
+          <p class="t-muted" style="margin:0 0 12px">Choose an Excel (.xlsx) or JSON backup made by this app. You can add only new records or replace everything.</p>
+          <input type="file" id="import-file" accept=".json,.xlsx,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-change="importFile">
           <details style="margin-top:12px"><summary class="t-muted">Or paste backup text</summary><textarea class="input" id="import-text" style="margin-top:8px;min-height:120px" placeholder='{"version":1, …}'></textarea><button class="btn" style="margin-top:8px" data-act="importText">Import pasted text</button></details></div></div>
         <div class="card"><div class="card-h"><h2>Start again</h2></div><div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn" data-act="demo">Load sample data</button><button class="btn danger" data-act="wipe">Delete all data</button></div></div>
@@ -1479,7 +1577,7 @@
   // ---------- Backup / import / CSV ----------
   function download(name, text, type) {
     try {
-      const blob = new Blob([text], { type });
+      const blob = text instanceof Blob ? new Blob([text], { type }) : new Blob([text], { type });
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
       document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
       return true;
@@ -1586,6 +1684,24 @@
     setTarget: () => form({ title: 'Revenue target', values: { fyTarget: S.settings.fyTarget }, fields: [{ name: 'fyTarget', label: `Fee target for FY ${fyOf().label} (₹, excl. GST)`, type: 'number', min: 0, required: true, full: true }], onSave: (d) => { S.settings.fyTarget = num(d.fyTarget); toast('Target saved'); return true; } }),
     exportReport: () => { const t = reportTable(); const csv = toCSV(t.cols, t.total ? [...t.rows, t.total] : t.rows); const name = `cloudbook-${UI.reports.tab}-${todayISO()}.csv`; download(name, csv, 'text/csv'); toast('CSV exported'); },
     backup: () => { const txt = backupText(); download(`cloudbook-desk-backup-${todayISO()}.json`, txt, 'application/json'); S.settings.lastBackup = todayISO(); save(); toast('Backup downloaded'); render(); },
+    backupXlsx: () => {
+      try { download(xlsxName(true), new Blob([xlsxBytes()]), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); S.settings.lastBackup = todayISO(); save(); toast('Excel backup downloaded'); render(); }
+      catch (e) { toast(e.message); }
+    },
+    chooseBackupDir: async () => {
+      if (!canAutoBackup()) { toast('Open the app in Chrome or Edge on a computer to use automatic backup'); return; }
+      try {
+        const h = await window.showDirectoryPicker({ id: 'cloudbook-backup', mode: 'readwrite' });
+        await idb('readwrite', (st) => st.put(h, 'backupDir'));
+        AB.dir = h; AB.state = 'on'; await writeAutoBackup(); toast(`Excel backup on: saving to “${h.name}”`); render();
+      } catch (e) { if (e.name !== 'AbortError') toast('Could not use that folder: ' + e.message); }
+    },
+    resumeBackup: async () => {
+      if (!AB.dir) return ACT.chooseBackupDir();
+      try { const p = await AB.dir.requestPermission({ mode: 'readwrite' }); AB.state = p === 'granted' ? 'on' : 'paused'; if (AB.state === 'on') { await writeAutoBackup(); toast('Excel backup resumed'); } render(); } catch (e) { toast(e.message); }
+    },
+    backupNow: async () => { await writeAutoBackup(); toast('Excel backup saved'); render(); },
+    stopBackup: async () => { try { await idb('readwrite', (st) => st.delete('backupDir')); } catch (e) { /* ignore */ } AB.dir = null; AB.state = canAutoBackup() ? 'off' : 'unsupported'; toast('Automatic backup turned off'); render(); },
     copyBackup: () => { const txt = backupText(); S.settings.lastBackup = todayISO(); save(); showText('Backup text', txt); },
     copyOut: () => { const ta = $('#out-text'); const done = () => toast('Copied'); if (navigator.clipboard) navigator.clipboard.writeText(ta.value).then(done, () => { ta.select(); toast('Press Ctrl+C to copy'); }); else { ta.select(); toast('Press Ctrl+C to copy'); } },
     importText: () => doImport($('#import-text').value),
@@ -1625,7 +1741,12 @@
     if (c.dataset.change === 'jobStatus') { const j = job(c.dataset.id); j.status = c.value; j.doneOn = j.status === DONE ? (j.doneOn || todayISO()) : null;
       const fl = j.filingId ? byId(S.filings, j.filingId) : null; if (fl && j.status === DONE && fl.status !== 'Filed') { fl.status = 'Filed'; fl.filedOn = j.doneOn; } toast(j.status === DONE && j.billing === 'Not billed' && num(j.fee) ? 'Marked done — ready to bill' : 'Status updated'); commit(); }
     if (c.dataset.change === 'theme') { try { localStorage.setItem(THEME_KEY, c.value); } catch (err) { /* storage blocked */ } applyTheme(); }
-    if (c.dataset.change === 'importFile') { const file = c.files[0]; if (!file) return; const r = new FileReader(); r.onload = () => doImport(String(r.result)); r.readAsText(file); c.value = ''; }
+    if (c.dataset.change === 'importFile') {
+      const file = c.files[0]; if (!file) return; const r = new FileReader();
+      if (/\.xlsx$/i.test(file.name)) { r.onload = () => { try { doImport(readExcelBackup(new Uint8Array(r.result))); } catch (err) { toast(err.message); } }; r.readAsArrayBuffer(file); }
+      else { r.onload = () => doImport(String(r.result)); r.readAsText(file); }
+      c.value = '';
+    }
   });
   document.addEventListener('submit', (e) => {
     if (e.target.dataset.submit === 'settings') {
@@ -1643,6 +1764,6 @@
   }
   window.addEventListener('hashchange', () => { closeModal(); render(); window.scrollTo(0, 0); });
 
-  load(); applyTheme(); render();
-  window.CloudbookDesk = { get state() { return S; }, render };
+  load(); applyTheme(); render(); initAutoBackup();
+  window.CloudbookDesk = { get state() { return S; }, render, _ab: AB, _write: () => writeAutoBackup() };
 })();

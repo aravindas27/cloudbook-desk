@@ -43,6 +43,12 @@ python3 -m http.server 8000
 3. In the repository, open **Settings → Pages**. Under **Build and deployment**, choose **Deploy from a branch**, then branch `main` and folder `/ (root)`. Save.
 4. After a minute, the site is live at `https://<your-username>.github.io/cloudbook-desk/`.
 
+## Excel backup
+
+- **Automatic (Chrome or Edge on a computer):** Settings & data → **Choose backup folder**. Pick a folder inside Google Drive or OneDrive. From then on, about 3 seconds after every change, the app saves `Cloudbook-Desk-latest.xlsx` and one dated copy per day (`Cloudbook-Desk-YYYY-MM-DD.xlsx`). The browser asks for permission again once per visit: click **Resume Excel backup** on the banner.
+- **Manual (any browser):** Settings & data → **Download Excel backup**.
+- The Excel file has readable sheets (Summary, Clients, Jobs, Timesheet, Invoices, Payments, Expenses, Filings, Team, Services) plus a hidden `_backup` sheet. To restore, choose the .xlsx file under **Restore or import**. Don't edit the `_backup` sheet.
+
 ## Where your data lives
 
 - Everything you enter is saved in **your browser on that computer** (localStorage). Nothing is sent to GitHub or to any server.
