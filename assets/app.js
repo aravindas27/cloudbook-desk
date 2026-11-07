@@ -16,6 +16,8 @@
   const CATEGORIES = ['GST', 'TDS', 'Income tax', 'Accounts', 'ROC / MCA', 'Payroll', 'Advisory', 'Other'];
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const FILING_STATUS = ['Pending', 'In progress', 'Filed', 'Not applicable'];
+  const EXP_CATS = ['Government / statutory fee', 'Late fee / interest (GST, TDS, ROC)', 'MCA / ROC filing fee', 'Tax paid for client (GST, TDS, advance tax)', 'DSC (digital signature)', 'Stamp paper / notary', 'Professional fee paid (auditor, valuer, advocate)', 'Travel and conveyance', 'Courier and postage', 'Printing and documents', 'Other'];
+  const PAID_BY = ['Firm bank account', 'Partner personally', 'Cash', 'Firm card / UPI'];
   // Statutory filings. kind 'annual': due on md in the first calendar year of the compliance FY
   // (accounts year just ended). kind 'tdsq': quarterly TDS returns. late = estimated late fee.
   const FILINGS = [
@@ -102,7 +104,7 @@
     settings: { firmName: 'Cloudbook Associates LLP', gstin: '', pan: '', address: '', phone: '', email: '', gstRate: 18, fyStartMonth: 4, invoiceDueDays: 15, defaultCostRate: 350, capacityHours: 160, invoicePrefix: 'INV-', jobPrefix: 'J-', fyTarget: 1000000 },
     team: [{ id: 'm_owner', name: 'Aravind A S', role: 'Designated Partner', costRate: 500, billRate: 1200, capacity: 160, active: true }],
     services: DEFAULT_SERVICES.map(([name, category, recurring, fee, hours]) => ({ id: uid('s'), name, category, recurring, fee, hours })),
-    clients: [], jobs: [], time: [], invoices: [], filings: [],
+    clients: [], jobs: [], time: [], invoices: [], filings: [], expenses: [],
     seq: { job: 0, invoice: 0 },
     started: false,
   });
@@ -117,7 +119,20 @@
   function migrate(d) {
     const b = blank();
     d.settings = Object.assign({}, b.settings, d.settings || {});
-    ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
+    ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings', 'expenses'].forEach((k) => { if (!Array.isArray(d[k])) d[k] = []; });
+    // Older versions kept "govt fees to recover" as a number on jobs and filings. Turn those into expense records once.
+    d.jobs.forEach((j) => {
+      if (num(j.govtFees) > 0 && !j.govtMigrated) {
+        if (!d.expenses.some((e) => e.id === 'x_' + j.id)) d.expenses.push({ id: 'x_' + j.id, date: j.doneOn || j.start || todayISO(), clientId: j.clientId, jobId: j.id, category: 'Government / statutory fee', description: 'Govt fees / challans for ' + j.title, amount: num(j.govtFees), recover: true, paidBy: 'Firm bank account', ref: '', invoiceId: j.billing === 'Billed' ? j.invoiceId || null : null, notes: 'Moved from the job’s govt fees field' });
+        j.govtFees = 0; j.govtMigrated = true;
+      }
+    });
+    d.filings.forEach((f) => {
+      if (num(f.govtFee) > 0) {
+        if (!d.expenses.some((e) => e.id === 'x_' + f.id)) d.expenses.push({ id: 'x_' + f.id, date: f.filedOn || f.due || todayISO(), clientId: f.clientId, jobId: f.jobId || null, filingId: f.id, category: 'Late fee / interest (GST, TDS, ROC)', description: 'Govt / late fee for ' + f.code + ' ' + f.period, amount: num(f.govtFee), recover: true, paidBy: 'Firm bank account', ref: f.srn || '', invoiceId: null, notes: '' });
+        f.govtFee = 0;
+      }
+    });
     d.clients.forEach((c) => { if (!Array.isArray(c.filingCodes)) c.filingCodes = []; });
     d.seq = Object.assign({ job: 0, invoice: 0 }, d.seq || {});
     d.invoices.forEach((i) => { if (!Array.isArray(i.payments)) i.payments = []; if (!Array.isArray(i.jobIds)) i.jobIds = []; });
@@ -143,17 +158,30 @@
   const readyToBill = (j) => isDone(j) && j.billing === 'Not billed' && num(j.fee) > 0;
   const rateOf = (e) => (e.costRate != null ? num(e.costRate) : num(member(e.memberId)?.costRate ?? S.settings.defaultCostRate));
 
+  const expStatus = (e) => (!e.recover ? 'Absorbed' : e.invoiceId && byId(S.invoices, e.invoiceId) ? 'Billed' : 'To recover');
+  const expToRecover = (e) => expStatus(e) === 'To recover';
+  function expChip(e) {
+    const st = expStatus(e);
+    if (st === 'Billed') { const i = byId(S.invoices, e.invoiceId); return `<span class="chip acc">Billed · ${esc(i.number)}</span>`; }
+    if (st === 'Absorbed') return '<span class="chip">Firm’s cost</span>';
+    const age = -daysFrom(e.date);
+    return `<span class="chip ${age > 30 ? 'bad' : 'warn'}">To recover${age > 0 ? ' · ' + age + 'd' : ''}</span>`;
+  }
   function jobStats(j) {
     const es = S.time.filter((t) => t.jobId === j.id);
+    const jx = S.expenses.filter((e) => e.jobId === j.id);
+    const absorbed = sum(jx.filter((e) => !e.recover), (e) => e.amount);
+    const recoverable = sum(jx.filter(expToRecover), (e) => e.amount);
     const hours = sum(es, (e) => e.hours);
     const costActual = sum(es, (e) => num(e.hours) * rateOf(e));
     const billValue = sum(es, (e) => num(e.hours) * num(member(e.memberId)?.billRate));
     const estimated = hours === 0;
     const useHours = estimated ? num(j.budgetHours) : hours;
-    const cost = estimated ? useHours * num(S.settings.defaultCostRate) : costActual;
+    const timeCost = estimated ? useHours * num(S.settings.defaultCostRate) : costActual;
+    const cost = timeCost + absorbed;
     const fee = num(j.fee);
     return {
-      hours, useHours, cost, estimated, billValue, fee,
+      hours, useHours, cost, timeCost, absorbed, recoverable, estimated, billValue, fee,
       margin: fee - cost,
       marginPct: fee ? (fee - cost) / fee : null,
       perHour: useHours ? fee / useHours : null,
@@ -237,7 +265,8 @@
     }
     if (f.status === 'Filed' && !isDone(j)) { j.status = DONE; j.doneOn = f.filedOn || todayISO(); }
     if (f.status === 'In progress' && j.status === 'Not started') j.status = 'In progress';
-    if (j.billing === 'Not billed') { j.fee = num(f.fee); j.govtFees = num(f.govtFee); }
+    if (j.billing === 'Not billed') { j.fee = num(f.fee); }
+    S.expenses.forEach((e) => { if (e.filingId === f.id && !e.jobId) e.jobId = j.id; });
     return j;
   }
   function periodRange(key) {
@@ -290,6 +319,7 @@
     att: 'overdue',
     reports: { tab: 'clients', period: 'fy', month: monthKey(todayISO()) },
     comp: { y1: null, view: 'grid', status: 'open', client: '', cat: '' },
+    exp: { q: '', status: 'To recover', client: '', cat: '', sort: 'date', dir: -1 },
   };
 
   // ---------- Rendering ----------
@@ -310,6 +340,7 @@
     $('#brand-name').innerHTML = `${esc(shortFirm())}<small>Practice desk</small>`;
     const od = S.jobs.filter(isOverdue).length;
     const b = $('#nav-overdue'); b.hidden = !od; b.textContent = od;
+    const xo = S.expenses.filter((e) => expToRecover(e) && daysFrom(e.date) < -30).length; const bx = $('#nav-exp'); if (bx) { bx.hidden = !xo; bx.textContent = xo; bx.title = 'Expenses unrecovered for over 30 days'; }
     const fo = S.filings.filter(filingOverdue).length; const bf = $('#nav-filings'); if (bf) { bf.hidden = !fo; bf.textContent = fo; }
     let html = '';
     try { html = page(id); } catch (e) { console.error(e); html = `<div class="card card-b"><b>Something went wrong showing this page.</b><p class="t-muted">${esc(e.message)}</p></div>`; }
@@ -420,6 +451,7 @@
       ['ready', 'Ready to bill', ready.length],
       ['late', 'Unpaid 30+ days', late.length],
       ['filings', 'Filings overdue', filOver.length],
+      ['exp', 'Expenses to recover', S.expenses.filter(expToRecover).length],
       ['budget', 'Over budget', overBudget.length],
     ];
     let list = '';
@@ -427,6 +459,7 @@
     if (UI.att === 'ready') list = ready.sort((a, b) => num(b.fee) - num(a.fee)).slice(0, 8).map((j) => `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)}${j.doneOn ? ' · done ' + fmtDs(j.doneOn) : ''}</small></div><span class="amt">${inr(j.fee)}</span><button class="btn sm" data-act="newInvoice" data-client="${j.clientId}">Invoice</button></li>`).join('');
     if (UI.att === 'late') list = late.slice(0, 8).map((x) => `<li><div class="what"><a href="#invoice/${x.i.id}"><b>${esc(x.i.number)}</b></a><small>${esc(client(x.i.clientId).name)} · due ${fmtDs(x.i.dueDate)}</small></div><span class="amt">${inr(x.st.balance)}</span><span class="chip bad plain">${x.st.daysOver}d</span></li>`).join('');
     if (UI.att === 'filings') list = filOver.slice(0, 8).map((f) => `<li><div class="what"><a href="#compliance" data-act="filing" data-id="${f.id}"><b>${esc(FIL[f.code]?.name || f.code)}</b></a><small>${esc(client(f.clientId).name)} · ${esc(f.period)}</small></div>${lateFee(f) ? `<span class="amt t-bad">≈ ${inr(lateFee(f))}</span>` : ''}${filingChip(f, true)}</li>`).join('');
+    if (UI.att === 'exp') { const g = {}; S.expenses.filter(expToRecover).forEach((e) => { const o = g[e.clientId] || (g[e.clientId] = { n: 0, amt: 0, oldest: e.date }); o.n++; o.amt += num(e.amount); if (e.date < o.oldest) o.oldest = e.date; }); list = Object.entries(g).sort((a, b) => b[1].amt - a[1].amt).slice(0, 8).map(([cid, o]) => `<li><div class="what"><a href="#client/${cid}"><b>${esc(client(cid).name)}</b></a><small>${o.n} expense${o.n === 1 ? '' : 's'} · oldest ${fmtDs(o.oldest)}</small></div><span class="amt">${inr(o.amt)}</span><button class="btn sm" data-act="newInvoice" data-client="${cid}">Invoice</button></li>`).join(''); }
     if (UI.att === 'budget') list = overBudget.slice(0, 8).map((j) => { const s = jobStats(j); return `<li><div class="what"><a href="#job/${j.id}"><b>${esc(j.title)}</b></a><small>${esc(client(j.clientId).name)}</small></div><span class="amt t-bad">${hrs(s.hours)} / ${hrs(j.budgetHours)} h</span></li>`; }).join('');
     const att = `<div class="card"><div class="card-h"><h2>Needs your attention</h2></div>
       <div class="tabs" role="tablist">${tabs.map(([k, l, n]) => `<button class="${UI.att === k ? 'on' : ''}" data-act="att" data-k="${k}" role="tab" aria-selected="${UI.att === k}">${l}<span class="n">${n}</span></button>`).join('')}</div>
@@ -543,7 +576,7 @@
           <div><span>Start</span><b>${fmtD(j.start)}</b></div>
           <div><span>Due</span><b>${dueChip(j)}</b></div>
           <div><span>Fee (excl. GST)</span><b>${inr(num(j.fee))}</b></div>
-          <div><span>Govt fees to recover</span><b>${inr(num(j.govtFees))}</b></div>
+          <div><span>Expenses to recover</span><b class="${st.recoverable ? 't-warn' : ''}">${inr(st.recoverable)}</b></div>
           <div><span>Repeats</span><b>${esc((RECUR.find((r) => r[0] === j.recurring) || RECUR[0])[1])}</b></div>
           <div><span>Billing</span><b>${billChip(j)}${inv ? ` <a href="#invoice/${inv.id}">${esc(inv.number)}</a>` : ''}</b></div>
           ${isDone(j) ? `<div><span>Completed on</span><b>${fmtD(j.doneOn)}</b></div>` : ''}
@@ -554,7 +587,7 @@
         <div class="card-b">
           <div class="costing">
             <div class="box"><span>Hours ${num(j.budgetHours) ? 'used / budget' : 'logged'}</span><b class="${st.over ? 't-bad' : ''}">${hrs(st.hours)}${num(j.budgetHours) ? ` / ${hrs(j.budgetHours)}` : ''}</b>${used != null ? `<div class="meter ${st.over ? 'over' : ''}" style="margin-top:6px"><i style="width:${Math.min(100, used * 100)}%"></i></div>` : ''}</div>
-            <div class="box"><span>Cost of time${st.estimated ? ' (est.)' : ''}</span><b>${inr(st.cost)}</b></div>
+            <div class="box"><span>Cost${st.estimated ? ' (time est.)' : ''}</span><b>${inr(st.cost)}</b>${st.absorbed ? `<span>time ${inr(st.timeCost)} + firm’s expenses ${inr(st.absorbed)}</span>` : ''}</div>
             <div class="box"><span>Margin</span><b class="${st.margin < 0 ? 't-bad' : ''}">${inr(st.margin)}</b></div>
             <div class="box"><span>Margin %</span><b class="${st.marginPct != null && st.marginPct < 0.3 ? 't-warn' : ''}">${pct(st.marginPct)}</b></div>
             <div class="box"><span>Earned per hour</span><b>${inr(st.perHour)}</b></div>
@@ -565,6 +598,7 @@
         ${entries.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Who</th><th>Work done</th><th class="n">Hours</th><th class="n">Cost</th><th></th></tr></thead><tbody>
         ${entries.map((e) => `<tr><td>${fmtD(e.date)}</td><td>${esc(member(e.memberId)?.name || '—')}</td><td>${esc(e.note || '')}</td><td class="n">${hrs(e.hours)}</td><td class="n">${inr(num(e.hours) * rateOf(e))}</td><td class="n"><button class="btn sm ghost" data-act="editTime" data-id="${e.id}">Edit</button></td></tr>`).join('')}
         </tbody></table></div>` : empty('No time logged', 'Log time as you work to see the real cost of this job.')}</div>
+      ${expCard(S.expenses.filter((e) => e.jobId === j.id), { client: j.clientId, job: j.id })}
       <div style="display:flex;gap:8px;flex-wrap:wrap">
         ${j.recurring && j.recurring !== 'none' ? `<button class="btn" data-act="nextPeriod" data-id="${j.id}">Create next period’s job</button>` : ''}
         <button class="btn danger" data-act="deleteJob" data-id="${j.id}">Delete job</button>
@@ -750,6 +784,7 @@
         <div class="card"><div class="card-h"><h2>Jobs</h2></div>${js.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${js.map((j) => { const s = jobStats(j); return `<tr class="click" data-href="#job/${j.id}"><td><b style="font-weight:500">${esc(j.title)}</b><small>${esc(j.period || '')}</small></td><td>${statusChip(j.status)}</td><td class="n">${inr(num(j.fee))}</td><td class="n">${marginCell(s)}</td></tr>`; }).join('')}</tbody></table></div>` : empty('No jobs', 'Open the first job for this client.')}</div>
         <div class="card"><div class="card-h"><h2>Invoices</h2></div>${invs.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${invs.map((i) => { const s = invStats(i); return `<tr class="click" data-href="#invoice/${i.id}"><td><b style="font-weight:500">${esc(i.number)}</b><small>${fmtD(i.date)}</small></td><td class="n">${inr(i.total)}</td><td>${invChip(s)}</td></tr>`; }).join('')}</tbody></table></div>` : empty('No invoices', 'Nothing billed yet.')}</div>
       </div>
+      ${expCard(S.expenses.filter((e) => e.clientId === c.id), { client: c.id })}
       <div class="card"><div class="card-h"><h2>Compliance</h2><span class="hint">${(c.filingCodes || []).length ? (c.filingCodes || []).map((x) => FIL[x]?.short || x).join(' · ') : 'No filings set up'}</span><span class="right"><button class="btn sm" data-act="compProfile" data-id="${c.id}">Set up filings</button></span></div>
         ${(() => { const fs = S.filings.filter((f) => f.clientId === c.id).sort((a, b) => b.due.localeCompare(a.due)); return fs.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${fs.map((f) => `<tr class="click" data-act="filing" data-id="${f.id}"><td>${esc(FIL[f.code]?.name || f.code)}<small>${esc(f.period)}${f.srn ? ' · SRN ' + esc(f.srn) : ''}</small></td><td>${filingChip(f)}</td><td class="n">${inr(num(f.fee))}</td></tr>`).join('')}</tbody></table></div>` : empty('No filings yet', 'Set up the filings you handle for this client.'); })()}</div>
       <div><button class="btn danger" data-act="deleteClient" data-id="${c.id}">Delete client</button></div>`;
@@ -758,7 +793,7 @@
   PAGES.reports = () => {
     const R = UI.reports, range = periodRange(R.period);
     setHead('Reports', range.label === 'All time' ? 'All time' : `FY ${range.label}`, `<button class="btn" data-act="exportReport">Export CSV</button>`);
-    const tabs = [['clients', 'Client profitability'], ['services', 'Service profitability'], ['team', 'Team utilisation'], ['monthly', 'Monthly summary']];
+    const tabs = [['clients', 'Client profitability'], ['services', 'Service profitability'], ['team', 'Team utilisation'], ['monthly', 'Monthly summary'], ['expenses', 'Client expenses']];
     const period = R.tab === 'team' ? `<input class="input" type="month" id="r-month" value="${R.month}" data-filter="reports.month" aria-label="Month" style="width:auto">` : `<select class="input" id="r-period" data-filter="reports.period" aria-label="Period" style="width:auto">${[['fy', 'This FY'], ['lastfy', 'Last FY'], ['all', 'All time']].map(([v, l]) => `<option value="${v}" ${R.period === v ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
     const table = reportTable();
     return `<div class="card"><div class="tabs">${tabs.map(([k, l]) => `<button class="${R.tab === k ? 'on' : ''}" data-act="rtab" data-k="${k}">${l}</button>`).join('')}</div>
@@ -795,6 +830,14 @@
       const T = { name: 'Total', hours: sum(rows, (r) => r.hours), cap: sum(rows, (r) => r.cap), cost: sum(rows, (r) => r.cost), value: sum(rows, (r) => r.value) };
       T.util = T.cap ? T.hours / T.cap : null;
       return { cols: [{ key: 'name', label: 'Person' }, { key: 'role', label: 'Role' }, { key: 'hours', label: 'Hours logged', n: 1, fmt: hrs }, { key: 'cap', label: 'Capacity', n: 1, fmt: hrs }, { key: 'util', label: 'Utilisation', n: 1, fmt: pct, cls: (r) => (r.util > 1 ? 't-bad' : r.util < 0.5 ? 't-warn' : '') }, { key: 'cost', label: 'Cost', n: 1, fmt: inr }, { key: 'value', label: 'Value at bill rate', n: 1, fmt: inr }, { key: 'jobs', label: 'Jobs worked', n: 1 }], rows, total: T, note: `Hours logged in ${monthLabel(mk)} against monthly capacity.` };
+    }
+    if (R.tab === 'expenses') {
+      const xs = S.expenses.filter((e) => inRange(e.date, range));
+      const g = {};
+      xs.forEach((e) => { const k = client(e.clientId).name; const o = g[k] || (g[k] = { name: k, n: 0, spent: 0, billed: 0, open: 0, absorbed: 0 }); o.n++; o.spent += num(e.amount); const st = expStatus(e); if (st === 'Billed') o.billed += num(e.amount); else if (st === 'Absorbed') o.absorbed += num(e.amount); else o.open += num(e.amount); });
+      const rows = Object.values(g).sort((a, b) => b.spent - a.spent);
+      const T = { name: 'Total', n: sum(rows, (r) => r.n), spent: sum(rows, (r) => r.spent), billed: sum(rows, (r) => r.billed), open: sum(rows, (r) => r.open), absorbed: sum(rows, (r) => r.absorbed) };
+      return { cols: [{ key: 'name', label: 'Client' }, { key: 'n', label: 'Expenses', n: 1 }, { key: 'spent', label: 'Spent for client', n: 1, fmt: inr }, { key: 'billed', label: 'Billed back', n: 1, fmt: inr }, { key: 'open', label: 'Still to recover', n: 1, fmt: inr, cls: (r) => (r.open ? 't-warn' : '') }, { key: 'absorbed', label: 'Firm’s own cost', n: 1, fmt: inr }], rows, total: T, note: 'Money you paid on behalf of clients, by expense date.' };
     }
     const fy = range.label === 'All time' ? fyOf() : range;
     const months = [...Array(12)].map((_, k) => monthKey(addMonths(fy.start, k)));
@@ -905,6 +948,8 @@
     const ops = [];
     const readyJobs = S.jobs.filter(readyToBill);
     if (readyJobs.length) ops.push({ kind: 'Bill now', value: ready, text: `${readyJobs.length} finished jobs have no invoice. Raise them this week.`, link: '#jobs', act: 'jobsReady' });
+    const toRec = S.expenses.filter(expToRecover);
+    if (toRec.length) ops.push({ kind: 'Recover expenses', value: sum(toRec, (e) => e.amount), text: `${toRec.length} expenses you paid for clients are not on any invoice yet. This is your own cash: add them to the next invoices.`, link: '#expenses' });
     const owed = S.invoices.map((i) => ({ i, st: invStats(i) })).filter((x) => x.st.balance > 0 && x.st.daysOver > 30);
     if (owed.length) ops.push({ kind: 'Collect', value: sum(owed, (x) => x.st.balance), text: `${owed.length} invoice${owed.length === 1 ? ' is' : 's are'} more than 30 days late: ${[...new Set(owed.map((x) => client(x.i.clientId).name.split(' (')[0]))].slice(0, 3).join(', ')}.`, link: '#invoices' });
     const roc = ['AOC4', 'MGT7', 'ADT1', 'DIR3', 'AGM'];
@@ -939,6 +984,45 @@
       ${ret.map((r) => `<tr class="click" data-href="#client/${r.c.id}"><td>${esc(r.c.name)}<small>${esc(r.c.type || '')}</small></td><td class="n">${inr(r.billedFY)}</td><td class="n">${r.comp ? inr(r.comp) : '·'}</td><td class="n">${r.rec ? inr(r.rec) : '·'}</td><td class="n"><b style="font-weight:500">${r.total ? inr(r.total) : '·'}</b>${r.total ? `<small>${inr(r.total / 12)} / month</small>` : ''}</td></tr>`).join('')}
       </tbody></table></div></div>`;
     return head + bar + opsCard + retCard;
+  };
+
+  function expCard(xs, preset) {
+    const list = xs.slice().sort((a, b) => b.date.localeCompare(a.date));
+    const open = sum(list.filter(expToRecover), (e) => e.amount);
+    return `<div class="card"><div class="card-h"><h2>Expenses paid for the client</h2><span class="hint">${list.length ? `${inr(sum(list, (e) => e.amount))} spent · ${inr(open)} still to recover` : 'Govt fees, challans, DSC, stamp paper, travel…'}</span><span class="right"><button class="btn sm" data-act="newExpense" data-client="${preset.client || ''}" data-job="${preset.job || ''}">Add expense</button></span></div>
+      ${list.length ? `<div class="tbl-wrap"><table class="tbl"><tbody>${list.map((e) => `<tr class="click" data-act="editExpense" data-id="${e.id}"><td style="width:110px">${fmtDs(e.date)}</td><td>${esc(e.description || e.category)}<small>${esc(e.category)}${e.ref ? ' · ' + esc(e.ref) : ''}</small></td><td class="n">${inr(num(e.amount))}</td><td>${expChip(e)}</td></tr>`).join('')}</tbody></table></div>` : empty('No expenses recorded', 'Record every amount you pay on the client’s behalf so it is billed back.')}</div>`;
+  }
+
+  PAGES.expenses = () => {
+    const f = UI.exp, fy = fyOf();
+    setHead('Expenses', 'Money paid on behalf of clients, and whether it has been billed back', `<button class="btn primary" data-act="newExpense">Add expense</button>`);
+    const all = S.expenses;
+    const toRec = all.filter(expToRecover);
+    const recFY = all.filter((e) => expStatus(e) === 'Billed' && inRange(e.date, fy));
+    const absFY = all.filter((e) => expStatus(e) === 'Absorbed' && inRange(e.date, fy));
+    const oldest = toRec.reduce((m, e) => (!m || e.date < m ? e.date : m), null);
+    const kpis = `<section class="kpis">
+      <div class="kpi ${toRec.length ? 'alert' : ''}"><span class="l">Still to recover</span><span class="v">${inrC(sum(toRec, (e) => e.amount))}</span><span class="s">${toRec.length} expenses${oldest ? ' · oldest ' + fmtDs(oldest) : ''}</span></div>
+      <div class="kpi good"><span class="l">Billed back, FY ${fy.label}</span><span class="v">${inrC(sum(recFY, (e) => e.amount))}</span><span class="s">${recFY.length} expenses on invoices</span></div>
+      <div class="kpi"><span class="l">Firm’s own cost, FY ${fy.label}</span><span class="v">${inrC(sum(absFY, (e) => e.amount))}</span><span class="s">absorbed, counted in job cost</span></div>
+      <div class="kpi"><span class="l">Clients owing expenses</span><span class="v">${new Set(toRec.map((e) => e.clientId)).size}</span><span class="s">raise an invoice to recover</span></div>
+    </section>`;
+    const q = f.q.trim().toLowerCase();
+    let rows = all.filter((e) => (!f.status || expStatus(e) === f.status) && (!f.client || e.clientId === f.client) && (!f.cat || e.category === f.cat) && (!q || (client(e.clientId).name + ' ' + (e.description || '') + ' ' + (e.ref || '') + ' ' + e.category).toLowerCase().includes(q)));
+    rows = sortRows(rows, 'exp', { date: (e) => e.date, client: (e) => client(e.clientId).name, amount: (e) => num(e.amount), cat: (e) => e.category });
+    const byClient = {};
+    toRec.forEach((e) => { const o = byClient[e.clientId] || (byClient[e.clientId] = { n: 0, amt: 0 }); o.n++; o.amt += num(e.amount); });
+    const recCard = Object.keys(byClient).length ? `<div class="card"><div class="card-h"><h2>To recover, by client</h2><span class="hint">Add these to the next invoice: they are your own cash</span></div><ul class="att">${Object.entries(byClient).sort((a, b) => b[1].amt - a[1].amt).map(([cid, o]) => `<li><div class="what"><a href="#client/${cid}"><b>${esc(client(cid).name)}</b></a><small>${o.n} expense${o.n === 1 ? '' : 's'}</small></div><span class="amt">${inr(o.amt)}</span><button class="btn sm" data-act="newInvoice" data-client="${cid}">Raise invoice</button></li>`).join('')}</ul></div>` : '';
+    const table = `<div class="card"><div class="card-b"><div class="filters">
+        <input class="input search" id="f-exp-q" type="search" placeholder="Search client, description, challan / SRN…" value="${esc(f.q)}" data-filter="exp.q" aria-label="Search expenses">
+        <select class="input" id="f-exp-status" data-filter="exp.status" aria-label="Status">${[['To recover', 'To recover'], ['Billed', 'Billed back'], ['Absorbed', 'Firm’s own cost'], ['', 'All expenses']].map(([v, l]) => `<option value="${v}" ${f.status === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+        <select class="input" id="f-exp-client" data-filter="exp.client" aria-label="Client"><option value="">All clients</option>${clientOptions().map(([v, l]) => `<option value="${v}" ${f.client === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+        <select class="input" id="f-exp-cat" data-filter="exp.cat" aria-label="Type"><option value="">All types</option>${EXP_CATS.map((c) => `<option ${f.cat === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div></div>
+      ${rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr>${th('date', 'Date', 'exp')}${th('client', 'Client and job', 'exp')}${th('cat', 'What was paid', 'exp')}<th>Paid from</th>${th('amount', 'Amount', 'exp', 'n')}<th>Status</th></tr></thead><tbody>
+      ${rows.map((e) => { const j = e.jobId ? job(e.jobId) : null; return `<tr class="click" data-act="editExpense" data-id="${e.id}"><td>${fmtDs(e.date)}</td><td>${esc(client(e.clientId).name)}${j ? `<small>${esc(j.title)}</small>` : ''}</td><td>${esc(e.description || e.category)}<small>${esc(e.category)}${e.ref ? ' · ' + esc(e.ref) : ''}</small></td><td>${esc(e.paidBy || '')}</td><td class="n">${inr(num(e.amount))}</td><td>${expChip(e)}</td></tr>`; }).join('')}
+      </tbody><tfoot><tr><td colspan="4">${rows.length} expenses</td><td class="n">${inr(sum(rows, (e) => e.amount))}</td><td></td></tr></tfoot></table></div>`
+        : empty(all.length ? 'No expenses match' : 'No expenses yet', all.length ? 'Change the filters to see more.' : 'Record every government fee, challan, DSC, stamp paper or travel cost you pay for a client.', all.length ? '' : '<button class="btn primary" data-act="newExpense">Add expense</button>')}</div>`;
+    return kpis + recCard + table;
   };
 
   PAGES.team = () => {
@@ -1047,7 +1131,6 @@
         { name: 'priority', label: 'Priority', type: 'select', options: ['Normal', 'High'] },
         { name: 'fee', label: 'Fee, excl. GST (₹)', type: 'number', min: 0, step: '1' },
         { name: 'budgetHours', label: 'Budget hours', type: 'number', min: 0, step: '0.25' },
-        { name: 'govtFees', label: 'Govt fees / challans to recover (₹)', type: 'number', min: 0, help: 'Late fees, MCA fees, DSC cost — billed at cost, no GST' },
         { name: 'recurring', label: 'Repeats', type: 'select', options: RECUR },
         { name: 'billing', label: 'Billing', type: 'select', options: BILLING },
         { name: 'notes', label: 'Notes', type: 'textarea', full: true },
@@ -1173,11 +1256,17 @@
       const pool = S.jobs.filter((j) => j.clientId === cid && (j.billing === 'Not billed' || (inv && inv.jobIds.includes(j.id)))).sort((a, b) => (isDone(b) - isDone(a)) || (a.due || '').localeCompare(b.due || ''));
       if (!$('#inv-jobs').dataset.init) { v.jobIds.forEach((id) => picked.add(id)); $('#inv-jobs').dataset.init = 1; }
       $('#inv-jobs').innerHTML = pool.length ? pool.map((j) => `<label><input type="checkbox" value="${j.id}" ${picked.has(j.id) ? 'checked' : ''}><span>${esc(j.title)}<br><small class="t-muted">${esc(j.period || '')} · ${esc(j.status)}${num(j.govtFees) ? ' · govt fees ' + inr(j.govtFees) : ''}</small></span><b class="num">${inr(num(j.fee))}</b></label>`).join('') : '<div class="empty" style="padding:14px">No unbilled jobs for this client. You can still enter amounts below.</div>';
+      const pickedX = new Set($$('#inv-exp input:checked').map((x) => x.value));
+      const xpool = S.expenses.filter((e) => e.clientId === cid && e.recover && (expToRecover(e) || (inv && e.invoiceId === inv.id))).sort((a, b) => a.date.localeCompare(b.date));
+      if (!$('#inv-exp').dataset.init) { xpool.forEach((e) => { if (!inv || e.invoiceId === inv.id) pickedX.add(e.id); }); $('#inv-exp').dataset.init = 1; } else if ($('#inv-exp').dataset.client !== cid) { xpool.forEach((e) => pickedX.add(e.id)); }
+      $('#inv-exp').dataset.client = cid;
+      $('#inv-exp').innerHTML = xpool.length ? xpool.map((e) => `<label><input type="checkbox" value="${e.id}" ${pickedX.has(e.id) ? 'checked' : ''}><span>${esc(e.description || e.category)}<br><small class="t-muted">${fmtD(e.date)} · ${esc(e.category)}${e.ref ? ' · ' + esc(e.ref) : ''}</small></span><b class="num">${inr(num(e.amount))}</b></label>`).join('') : '<div class="empty" style="padding:14px">No unbilled expenses for this client. Record them under Expenses.</div>';
       recalc(true);
     };
     const recalc = (fromJobs) => {
       const sel = $$('#inv-jobs input:checked').map((x) => job(x.value)).filter(Boolean);
-      if (fromJobs && sel.length) { $('#inv-fee').value = sum(sel, (j) => j.fee); $('#inv-reimb').value = sum(sel, (j) => j.govtFees); }
+      const selX = $$('#inv-exp input:checked').map((x) => byId(S.expenses, x.value)).filter(Boolean);
+      if (fromJobs) { if (sel.length) $('#inv-fee').value = sum(sel, (j) => j.fee); $('#inv-reimb').value = sum(selX, (e) => e.amount) + sum(sel, (j) => j.govtFees); }
       const fee = num($('#inv-fee').value), rate = num($('#inv-rate').value), reimb = num($('#inv-reimb').value);
       const gst = Math.round(fee * rate) / 100;
       $('#inv-sum').innerHTML = `<div class="sumline"><span>Professional fee</span><span>${inr(fee)}</span></div><div class="sumline"><span>GST @ ${rate}%${rate ? ' (CGST + SGST)' : ''}</span><span>${inr(gst)}</span></div><div class="sumline"><span>Reimbursements (no GST)</span><span>${inr(reimb)}</span></div><div class="sumline total"><span>Invoice total</span><span>${inr(Math.round(fee + gst + reimb))}</span></div>`;
@@ -1189,6 +1278,7 @@
       <div class="field"><label for="inv-due">Due date</label><input class="input" id="inv-due" type="date" value="${esc(v.dueDate || '')}"></div>
       <div class="field"><label for="inv-rate">GST rate (%)</label><input class="input" id="inv-rate" type="number" min="0" step="0.01" value="${esc(inv ? (num(inv.fee) ? round2(num(inv.gst) / num(inv.fee) * 100) : st.gstRate) : st.gstRate)}"></div>
       <div class="field full"><label>Jobs to bill</label><div class="pick" id="inv-jobs"></div></div>
+      <div class="field full"><label>Expenses to recover (billed at cost, no GST)</label><div class="pick" id="inv-exp"></div></div>
       <div class="field"><label for="inv-fee">Professional fee (₹)</label><input class="input" id="inv-fee" type="number" min="0" value="${esc(inv ? inv.fee : 0)}"></div>
       <div class="field"><label for="inv-reimb">Reimbursements (₹)</label><input class="input" id="inv-reimb" type="number" min="0" value="${esc(inv ? inv.reimb : 0)}"><span class="help">Govt fees and challans paid for the client</span></div>
       <div class="field full" id="inv-sum"></div>
@@ -1196,6 +1286,7 @@
     modal(isNew ? 'New invoice' : 'Edit invoice', body, `<button class="btn" data-act="close">Cancel</button><button class="btn primary" data-act="saveInvoice">${isNew ? 'Create invoice' : 'Save invoice'}</button>`, { wide: true });
     $('#inv-client').addEventListener('change', () => { $('#inv-jobs').dataset.init = 1; draw(); });
     $('#inv-jobs').addEventListener('change', () => recalc(true));
+    $('#inv-exp').addEventListener('change', () => recalc(true));
     ['#inv-fee', '#inv-rate', '#inv-reimb'].forEach((s) => $(s).addEventListener('input', () => recalc(false)));
     draw();
     if (inv) { $('#inv-fee').value = inv.fee; $('#inv-reimb').value = inv.reimb; recalc(false); }
@@ -1207,6 +1298,7 @@
       const gst = Math.round(fee * rate) / 100;
       if (fee + reimb <= 0) { toast('Enter an amount to bill'); return; }
       const jobIds = $$('#inv-jobs input:checked').map((x) => x.value);
+      const expIds = $$('#inv-exp input:checked').map((x) => x.value);
       const data = { clientId, number, date: $('#inv-date').value || todayISO(), dueDate: $('#inv-due').value || null, fee, gst, reimb, total: Math.round(fee + gst + reimb), jobIds, notes: $('#inv-notes').value.trim() };
       let target = inv;
       if (inv) {
@@ -1214,6 +1306,8 @@
         Object.assign(inv, data);
       } else { target = { id: uid('i'), payments: [], ...data }; S.invoices.push(target); S.started = true; }
       jobIds.forEach((id) => { const j = job(id); if (j) { j.billing = 'Billed'; j.invoiceId = target.id; } });
+      S.expenses.forEach((e) => { if (e.invoiceId === target.id && !expIds.includes(e.id)) e.invoiceId = null; });
+      expIds.forEach((id) => { const e = byId(S.expenses, id); if (e) e.invoiceId = target.id; });
       closeModal(); toast(inv ? 'Invoice saved' : `Invoice ${number} created`);
       location.hash = '#invoice/' + target.id; commit();
     };
@@ -1244,13 +1338,51 @@
     });
   }
 
+  function expenseForm(e, preset = {}) {
+    if (!S.clients.length) { toast('Add a client first'); return; }
+    const isNew = !e;
+    const v = e ? { ...e } : { date: todayISO(), category: 'Government / statutory fee', recover: true, paidBy: 'Firm bank account', clientId: preset.client || '', jobId: preset.job || '', filingId: preset.filing || null };
+    const billedInv = e && e.invoiceId ? byId(S.invoices, e.invoiceId) : null;
+    const jobOpts = (cid) => [['', 'Not linked to a job'], ...S.jobs.filter((j) => j.clientId === cid).sort((a, b) => (b.start || '').localeCompare(a.start || '')).map((j) => [j.id, j.title + (j.period ? ' · ' + j.period : '')])];
+    form({
+      title: isNew ? 'Add expense' : 'Edit expense', wide: true,
+      intro: billedInv ? `Already billed on <a href="#invoice/${billedInv.id}">${esc(billedInv.number)}</a>. If you change the amount, edit that invoice too.` : 'Record anything you paid for the client. Recoverable expenses appear on the client’s next invoice as reimbursements at cost (no GST). Expenses the firm absorbs are added to the job’s cost.',
+      values: v,
+      fields: [
+        { name: 'clientId', label: 'Client', type: 'select', options: clientOptions, required: true, placeholder: 'Choose a client' },
+        { name: 'jobId', label: 'Job', type: 'select', options: () => jobOpts(v.clientId) },
+        { name: 'date', label: 'Date paid', type: 'date', required: true },
+        { name: 'amount', label: 'Amount (₹)', type: 'number', required: true, min: 0, step: '0.01' },
+        { name: 'category', label: 'Type', type: 'select', options: EXP_CATS },
+        { name: 'paidBy', label: 'Paid from', type: 'select', options: PAID_BY },
+        { name: 'description', label: 'Description', full: true, required: true, placeholder: 'e.g. GSTR-3B late fee Jul 2026, MCA fee AOC-4, DSC for director' },
+        { name: 'ref', label: 'Challan / CPIN / SRN / receipt no.', placeholder: 'For proof when billing' },
+        { name: 'recover', label: 'Billing', type: 'checkbox', text: 'Recover from client (bill at cost on the next invoice)' },
+        { name: 'notes', label: 'Notes', type: 'textarea', full: true },
+      ],
+      submit: isNew ? 'Add expense' : 'Save expense',
+      onSave: (d) => {
+        if (num(d.amount) <= 0) { toast('Enter the amount paid'); return false; }
+        if (d.jobId && job(d.jobId)?.clientId !== d.clientId) d.jobId = '';
+        d.jobId = d.jobId || null;
+        if (!d.recover && e && e.invoiceId) { toast('This expense is on an invoice. Remove it from the invoice first.'); return false; }
+        if (isNew) { S.expenses.push({ id: uid('x'), invoiceId: null, filingId: v.filingId || null, ...d }); S.started = true; } else Object.assign(e, d);
+        toast(d.recover ? 'Expense saved — will go on the next invoice' : 'Expense saved as the firm’s cost');
+        return true;
+      },
+      onDelete: e ? () => { if (e.invoiceId && byId(S.invoices, e.invoiceId)) { toast('Billed expenses can’t be deleted. Remove it from the invoice first.'); return; } S.expenses = S.expenses.filter((x) => x.id !== e.id); toast('Expense deleted'); } : null,
+    });
+    const cs = $('#fld-clientId'), js = $('#fld-jobId');
+    if (cs && js) cs.addEventListener('change', () => { js.innerHTML = jobOpts(cs.value).map(([id, l]) => `<option value="${esc(id)}">${esc(l)}</option>`).join(''); });
+  }
+
   function filingForm(f) {
     const def = FIL[f.code] || { name: f.code, short: f.code };
     const j = f.jobId ? job(f.jobId) : null;
     const lf = lateFee(f);
     form({
       title: `${def.short} · ${client(f.clientId).name}`,
-      intro: `${esc(def.name)} for <b>${esc(f.period)}</b>, due ${fmtD(f.due)}.${lf ? ` <span class="t-bad">Overdue: client late fee so far about ${inr(lf)}.</span>` : ''}${j ? ` Billing job: <a href="#job/${j.id}">${esc(j.code)}</a> (${esc(j.billing)}).` : ''}`,
+      intro: `${esc(def.name)} for <b>${esc(f.period)}</b>, due ${fmtD(f.due)}.${lf ? ` <span class="t-bad">Overdue: client late fee so far about ${inr(lf)}.</span>` : ''}${j ? ` Billing job: <a href="#job/${j.id}">${esc(j.code)}</a> (${esc(j.billing)}).` : ''} Paid a late fee or MCA fee for this filing? <a href="#" data-act="newExpense" data-client="${f.clientId}" data-job="${f.jobId || ''}" data-filing="${f.id}">Record the expense</a>.`,
       values: { ...f, makeJob: false },
       fields: [
         { name: 'status', label: 'Status', type: 'select', options: FILING_STATUS },
@@ -1258,7 +1390,6 @@
         { name: 'srn', label: 'SRN / acknowledgement no.', placeholder: 'e.g. AB1234567' },
         { name: 'due', label: 'Due date', type: 'date', required: true },
         { name: 'fee', label: 'Your fee (₹, excl. GST)', type: 'number', min: 0 },
-        { name: 'govtFee', label: 'Govt / late fee paid for client (₹)', type: 'number', min: 0, help: 'Recovered at cost on the invoice' },
         { name: 'notes', label: 'Notes', type: 'textarea', full: true },
         ...(j ? [] : [{ name: 'makeJob', label: 'Billing', type: 'checkbox', text: 'Open a job for this filing now (it is created automatically when you mark it filed)', full: true }]),
       ],
@@ -1364,14 +1495,14 @@
     try { d = JSON.parse(text); } catch (e) { toast('That file is not valid JSON'); return; }
     if (!d || typeof d !== 'object' || !Array.isArray(d.jobs) || !Array.isArray(d.clients)) { toast('This does not look like a Cloudbook Desk backup'); return; }
     const hasData = S.jobs.length || S.clients.length || S.invoices.length;
-    const counts = `${d.clients.length} clients, ${d.jobs.length} jobs, ${(d.invoices || []).length} invoices, ${(d.filings || []).length} filings and ${(d.time || []).length} time entries`;
+    const counts = `${d.clients.length} clients, ${d.jobs.length} jobs, ${(d.invoices || []).length} invoices, ${(d.filings || []).length} filings, ${(d.expenses || []).length} expenses and ${(d.time || []).length} time entries`;
     modal('Import data', `<div class="modal-b"><div class="field full"><p style="margin:0">The file has ${counts}.</p>
       ${hasData ? '<p class="t-muted" style="margin:10px 0 0"><b>Add new items</b> keeps everything you already have and adds only records that are not in this browser yet. <b>Replace</b> wipes this browser and loads the file exactly.</p>' : ''}</div></div>`,
       `<button class="btn" data-act="close">Cancel</button>${hasData ? '<button class="btn danger" data-act="importReplace">Replace everything</button><button class="btn primary" data-act="importMerge">Add new items</button>' : '<button class="btn primary" data-act="importReplace">Import</button>'}`);
     ACT.importReplace = () => { S = migrate(d); S.started = true; delete S.exportedAt; delete S.app; closeModal(); location.hash = '#dashboard'; toast('Data imported'); commit(); };
     ACT.importMerge = () => {
       const m = migrate(JSON.parse(JSON.stringify(d))); let added = 0;
-      ['clients', 'services', 'team', 'jobs', 'time', 'invoices', 'filings'].forEach((k) => {
+      ['clients', 'services', 'team', 'jobs', 'time', 'invoices', 'filings', 'expenses'].forEach((k) => {
         const have = new Set(S[k].map((x) => x.id));
         const keys = k === 'filings' ? new Set(S.filings.map((x) => x.key)) : null;
         m[k].forEach((x) => { if (!have.has(x.id) && !(keys && keys.has(x.key))) { S[k].push(x); added++; } });
@@ -1433,6 +1564,7 @@
       const i = byId(S.invoices, d.id);
       confirmBox('Delete this invoice?', `${esc(i.number)} and its ${i.payments.length} payment record(s) will be removed. Its jobs go back to “Not billed”.`, 'Delete invoice', () => {
         i.jobIds.forEach((id) => { const j = job(id); if (j) { j.billing = 'Not billed'; j.invoiceId = null; } });
+        S.expenses.forEach((e) => { if (e.invoiceId === i.id) e.invoiceId = null; });
         S.invoices = S.invoices.filter((x) => x.id !== i.id); location.hash = '#invoices'; toast('Invoice deleted');
       });
     },
@@ -1441,6 +1573,8 @@
     jobsReady: (d, el, e) => { e.preventDefault(); UI.jobs.status = 'ready'; location.hash = '#jobs'; },
     rtab: (d) => { UI.reports.tab = d.k; render(); },
     filing: (d) => { const f = byId(S.filings, d.id); if (f) filingForm(f); },
+    newExpense: (d, el, e) => { if (e) e.preventDefault(); expenseForm(null, { client: d.client, job: d.job, filing: d.filing }); },
+    editExpense: (d) => { const x = byId(S.expenses, d.id); if (x) expenseForm(x); },
     compProfile: (d, el, e) => { if (e) e.preventDefault(); profileForm(d.id); },
     compYear: (d) => { UI.comp.y1 += num(d.d); render(); },
     compView: (d) => { UI.comp.view = d.k; render(); },

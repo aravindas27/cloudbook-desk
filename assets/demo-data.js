@@ -97,6 +97,13 @@ window.CB_DEMO = (blank, uid) => {
     inv.payments.push({ id: uid('p'), date: dueOn(-k + 1, 5), amount: inv.total - Math.round(inv.fee * 0.1), tds: Math.round(inv.fee * 0.1), mode: 'Bank transfer', ref: '' });
     S.invoices.push(inv);
   }
+  S.expenses = [
+    { id: uid('x'), date: day(-9), clientId: periyar.id, jobId: j8.id, category: 'Stamp paper / notary', description: 'Stamp paper and notary for retirement deed', amount: 1150, recover: true, paidBy: 'Cash', ref: 'Receipt 221', invoiceId: null, notes: '' },
+    { id: uid('x'), date: day(-5), clientId: periyar.id, jobId: j8.id, category: 'Travel and conveyance', description: 'Two visits to client office, Thrissur', amount: 1800, recover: false, paidBy: 'Partner personally', ref: '', invoiceId: null, notes: '' },
+    { id: uid('x'), date: day(-3), clientId: lake.id, jobId: j13.id, category: 'MCA / ROC filing fee', description: 'MCA fee AOC-4 and MGT-7', amount: 1200, recover: true, paidBy: 'Firm bank account', ref: 'SRN pending', invoiceId: null, notes: '' },
+    { id: uid('x'), date: day(-40), clientId: green.id, jobId: null, category: 'DSC (digital signature)', description: 'Class 3 DSC for designated partner', amount: 1350, recover: true, paidBy: 'Firm card / UPI', ref: 'eMudhra order 5531', invoiceId: null, notes: '' },
+  ];
+  j13.govtFees = 0; j13.govtMigrated = true;
   void j11; void j12; void j14; void stays;
   return S;
 };
