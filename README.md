@@ -49,9 +49,20 @@ python3 -m http.server 8000
 - **Manual (any browser):** Settings & data → **Download Excel backup**.
 - The Excel file has readable sheets (Summary, Clients, Jobs, Timesheet, Invoices, Payments, Expenses, Filings, Team, Services) plus a hidden `_backup` sheet. To restore, choose the .xlsx file under **Restore or import**. Don't edit the `_backup` sheet.
 
+## Online database (Supabase)
+
+The app saves the firm's data online in Supabase (Mumbai region), so it is the same on every computer and phone you sign in from.
+
+- **Sign-in required.** Logins are created by the firm owner in Supabase (Authentication → Users). Public sign-up is turned off.
+- **Row Level Security.** The database lets a signed-in user read or change only their own firm's record, and only if the owner has added them to `firm_members`. Anonymous visitors can read nothing. The key in `assets/cloud.js` is Supabase's publishable key, which is designed to be public.
+- **No silent overwrites.** Every save carries a version number. If another device saved first, you choose which version to keep.
+- **Daily online copy.** The database keeps one copy of the data per day for 180 days (`desk_snapshots`).
+- **Offline.** Changes are kept in the browser and saved online when the connection returns.
+- **Setup:** run `supabase/setup.sql` in the Supabase SQL Editor, create your login, then run the "STEP 2" lines at the bottom of that file.
+
 ## Where your data lives
 
-- Everything you enter is saved in **your browser on that computer** (localStorage). Nothing is sent to GitHub or to any server.
+- Your data is saved online in Supabase and cached in **your browser** (localStorage) for speed and offline use. Signing out clears the browser copy.
 - The code in the repository contains **no client data**. Only the sample firm in `assets/demo-data.js`, which is fictional.
 - **Never commit a backup file** (`*.json`) to the repository. `.gitignore` blocks the usual names, but check before you push.
 - Take a backup every week from **Settings and data → Download backup**. Use the same file to move to another computer or browser (**Restore or import**).
@@ -59,7 +70,7 @@ python3 -m http.server 8000
 
 ## Security
 
-- **No third-party requests.** Fonts (IBM Plex, SIL Open Font License) and the Excel writer (SheetJS 0.18.5, Apache 2.0) are hosted in this repository. A strict Content-Security-Policy allows scripts, styles, fonts and images only from the site itself, and blocks all network connections, so data cannot be sent anywhere even if something went wrong.
+- **No third-party requests.** Fonts (IBM Plex, SIL Open Font License) and the Excel writer (SheetJS 0.18.5, Apache 2.0) are hosted in this repository. A strict Content-Security-Policy allows scripts, styles, fonts and images only from the site itself, and allows network connections only to the firm's own Supabase project, so data cannot be sent anywhere else.
 - **Imports are validated.** Every record id must be plain letters, digits, `-` or `_`; files with anything else are refused. All fields are type-checked and unknown statuses or filing codes are dropped, so a damaged or tampered backup can neither inject code nor crash the app.
 - **Excel restore never runs a spreadsheet parser on your file.** It reads only the app's own hidden `_backup` sheet with a small built-in reader, which avoids the known file-parsing vulnerabilities in SheetJS 0.18.5 (CVE-2023-30533, CVE-2024-22363). SheetJS is used only to write backups.
 - **CSV exports** neutralise cells starting with `= + - @` so they can't run as formulas in Excel.
@@ -83,6 +94,8 @@ python3 -m http.server 8000
 index.html            App shell, navigation and security policy
 assets/app.css        Styles (Cloudbook navy and slate, light and dark themes)
 assets/app.js         Data store, validation, calculations, pages and forms
+assets/cloud.js       Sign-in and online sync with Supabase
+supabase/setup.sql    Database tables, access rules and daily copies
 assets/demo-data.js   Fictional sample firm for exploring
 assets/logo*.png      Cloudbook Associates logo (light and dark)
 assets/fonts/         IBM Plex Sans and Mono (self-hosted)

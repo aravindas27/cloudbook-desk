@@ -208,6 +208,7 @@
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       try { localStorage.setItem(KEY, JSON.stringify(S)); storageOk = true; } catch (e) { storageOk = false; }
+      cloudSchedule();
       footStatus();
       scheduleAutoBackup();
     }, 150);
@@ -215,7 +216,155 @@
   function footStatus() {
     const f = $('#nav-foot'); if (!f) return;
     const t = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+    if (CL) { f.textContent = cloudLabel(); f.dataset.sync = SY.state; return; }
     f.textContent = !storageOk ? 'Not saved: browser storage is blocked' : AB.state === 'on' ? `Saved · Excel backup ${AB.lastAt ? AB.lastAt : 'on'}` : 'Saved in this browser · ' + t;
+  }
+
+  // ---------- Online sync (Supabase) ----------
+  // The whole firm's data is one versioned record online. Each change is saved in this browser first,
+  // then sent online about a second later. A save only succeeds if nobody else saved in between;
+  // otherwise the user chooses which version to keep, so nothing is overwritten silently.
+  const CL = window.CloudbookCloud || null;
+  const META = KEY + '.cloud';
+  const SY = { ready: false, version: 0, dirty: false, busy: false, timer: null, retry: null, state: CL ? 'connecting' : 'off', lastAt: null, booted: false };
+  const hhmm = (d) => d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
+  function cloudLabel() {
+    const xl = AB.state === 'on' ? ' · Excel backup on' : '';
+    if (SY.state === 'saving' || (SY.state === 'saved' && SY.dirty)) return 'Saving online…';
+    if (SY.state === 'saved') return `Saved online${SY.lastAt ? ' · ' + hhmm(SY.lastAt) : ''}${xl}`;
+    if (SY.state === 'offline') return 'Offline · kept in this browser, will save online when connected';
+    if (SY.state === 'auth') return 'Not saved online · sign in again';
+    if (SY.state === 'conflict') return 'Waiting for your choice';
+    return 'Connecting…';
+  }
+  function metaSave() { try { localStorage.setItem(META, JSON.stringify({ firm: CL.firm, user: CL.user?.id || null, version: SY.version, dirty: SY.dirty })); } catch (e) { /* storage blocked */ } }
+  function metaLoad() { try { return JSON.parse(localStorage.getItem(META) || 'null') || {}; } catch (e) { return {}; } }
+  function writeLocal() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage blocked */ } metaSave(); }
+  function cloudSchedule() {
+    if (!CL || !SY.ready) return;
+    SY.dirty = true; metaSave();
+    clearTimeout(SY.timer); SY.timer = setTimeout(cloudPush, 1200);
+  }
+  async function cloudPush() {
+    if (!CL || !SY.ready || SY.busy || !SY.dirty) return;
+    clearTimeout(SY.retry);
+    const prevState = SY.state;
+    SY.busy = true; SY.dirty = false; SY.state = 'saving'; footStatus();
+    const snap = JSON.parse(JSON.stringify(S));
+    try {
+      const r = await CL.push(snap, SY.version);
+      if (r.conflict) { SY.busy = false; SY.dirty = true; metaSave(); cloudConflict(); return; }
+      SY.version = r.version; SY.state = 'saved'; SY.lastAt = new Date();
+    } catch (e) {
+      SY.dirty = true;
+      if (e.kind === 'auth') { SY.busy = false; SY.state = 'auth'; metaSave(); footStatus(); showLogin('Your session has ended. Sign in again to keep saving online. Your changes are kept in this browser.'); return; }
+      SY.state = 'offline'; SY.retry = setTimeout(cloudPush, 20000);
+    }
+    SY.busy = false; metaSave(); footStatus();
+    if (SY.dirty && SY.state === 'saved') { clearTimeout(SY.timer); SY.timer = setTimeout(cloudPush, 600); }
+    if (SY.state !== prevState && (SY.state === 'offline' || prevState === 'offline')) render();
+  }
+  function lockedModal(title, body, foot) {
+    $('#modal-root').innerHTML = `<div class="modal-bg"><div class="modal" role="alertdialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-h"><h3>${esc(title)}</h3></div><div class="modal-b"><div class="field full">${body}</div></div><div class="modal-f">${foot}</div></div></div>`;
+    const b = $('#modal-root .modal-f .btn.primary'); if (b) setTimeout(() => b.focus(), 30);
+  }
+  async function cloudConflict(latest) {
+    SY.state = 'conflict'; footStatus();
+    if (!latest) {
+      try { latest = await CL.pull(); } catch (e) { SY.state = 'offline'; footStatus(); SY.retry = setTimeout(cloudPush, 20000); return; }
+    }
+    const when = latest.updatedAt ? new Date(latest.updatedAt).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' }) : 'recently';
+    lockedModal('Changed on another device',
+      `<p style="margin:0 0 10px">The online data was changed from another computer, phone or browser tab (last saved ${esc(when)}) while this page had changes that were not yet saved online.</p>
+       <p style="margin:0 0 10px"><b>Keep this version</b> saves what you see on this page and replaces the online copy.</p>
+       <p class="t-muted" style="margin:0"><b>Use the online version</b> loads the other device’s data. The changes on this page are set aside in this browser, not lost.</p>`,
+      '<button class="btn" data-act="cloudUseLatest">Use the online version</button><button class="btn primary" data-act="cloudKeepMine">Keep this version</button>');
+    ACT.cloudUseLatest = () => {
+      try { localStorage.setItem(KEY + '.set-aside-' + Date.now(), JSON.stringify(S)); } catch (e) { /* storage full */ }
+      S = migrate(latest.data); SY.version = latest.version; SY.dirty = false; SY.state = 'saved'; SY.lastAt = new Date();
+      writeLocal(); closeModal(); render(); toast('Loaded the latest online version');
+    };
+    ACT.cloudKeepMine = () => { SY.version = latest.version; SY.dirty = true; SY.state = 'saving'; closeModal(); cloudPush(); };
+  }
+  function showLogin(msg, busy) {
+    SY.ready = false;
+    $('#app').hidden = true; closeModal();
+    let el = document.getElementById('login');
+    if (!el) { el = document.createElement('main'); el.id = 'login'; el.className = 'login'; document.body.appendChild(el); }
+    el.hidden = false;
+    el.innerHTML = `<form class="login-card" id="login-form" novalidate>
+      <img class="brand-logo light" src="assets/logo.png" alt="Cloudbook Associates LLP" width="398" height="101"><img class="brand-logo dark" src="assets/logo-dark.png" alt="Cloudbook Associates LLP" width="398" height="101">
+      <h1>${busy ? 'Opening your desk…' : 'Sign in to Cloudbook Desk'}</h1>
+      <p class="t-muted login-msg">${esc(msg || 'Your firm’s data is stored securely online. Sign in with the login set up for you.')}</p>
+      ${busy ? '' : `<div class="field"><label for="login-email">Email</label><input class="input" id="login-email" name="email" type="email" autocomplete="username" required></div>
+      <div class="field"><label for="login-pw">Password</label><input class="input" id="login-pw" name="password" type="password" autocomplete="current-password" required></div>
+      <p class="login-err" role="alert"></p>
+      <button class="btn primary" type="submit">Sign in</button>`}
+    </form>`;
+    const em = document.getElementById('login-email'); if (em) { if (CL.user?.email) em.value = CL.user.email; setTimeout(() => (em.value ? document.getElementById('login-pw') : em).focus(), 30); }
+  }
+  function hideLogin() { const el = document.getElementById('login'); if (el) { el.hidden = true; el.innerHTML = ''; } $('#app').hidden = false; }
+  async function doLogin(f) {
+    const btn = f.querySelector('button[type=submit]'), err = f.querySelector('.login-err');
+    const email = f.email.value.trim(), pw = f.password.value;
+    if (!email || !pw) { err.textContent = 'Enter your email and password.'; return; }
+    btn.disabled = true; btn.textContent = 'Signing in…'; err.textContent = '';
+    try { await CL.signIn(email, pw); f.password.value = ''; await cloudStart(); }
+    catch (e) { err.textContent = e.message; btn.disabled = false; btn.textContent = 'Sign in'; }
+  }
+  function cloudReady() {
+    SY.ready = true; hideLogin(); metaSave(); render(); footStatus();
+    if (!SY.booted) { SY.booted = true; initAutoBackup(); }
+    if (SY.dirty) cloudPush();
+  }
+  async function cloudStart() {
+    showLogin('Loading your data from the online database…', true);
+    const meta = metaLoad();
+    const localOk = meta.firm === CL.firm && S.started;
+    let r;
+    try { r = await CL.pull(); }
+    catch (e) {
+      if (e.kind === 'auth') return showLogin(e.message);
+      if (localOk) { SY.version = Number(meta.version) || 0; SY.dirty = !!meta.dirty; SY.state = 'offline'; cloudReady(); SY.retry = setTimeout(cloudPush, 20000); toast('Offline: working from this browser’s copy'); return; }
+      return showLogin(e.message + ' Then try again.');
+    }
+    if (r.notMember) { await CL.signOut(); return showLogin('This login is not linked to the firm yet. Ask the firm owner to add you, then sign in again.'); }
+    const empty = !r.data || !Array.isArray(r.data.clients);
+    if (empty) {
+      SY.version = r.version;
+      const n = S.clients.length + S.jobs.length + S.invoices.length;
+      if (S.started && n) {
+        hideLogin(); render();
+        lockedModal('Move your data online?', `<p style="margin:0 0 10px">The online database is empty. This browser has <b>${S.clients.length} clients, ${S.jobs.length} jobs and ${S.invoices.length} invoices</b>.</p><p class="t-muted" style="margin:0">Upload them now so they are saved online and available when you sign in anywhere.</p>`,
+          '<button class="btn" data-act="cloudStartEmpty">Start empty online</button><button class="btn primary" data-act="cloudUpload">Upload this data</button>');
+        ACT.cloudUpload = () => { closeModal(); SY.dirty = true; cloudReady(); };
+        ACT.cloudStartEmpty = () => { closeModal(); S = blank(); writeLocal(); cloudReady(); };
+        return;
+      }
+      SY.dirty = false; SY.state = 'saved'; cloudReady(); return;
+    }
+    if (meta.firm === CL.firm && meta.dirty && S.started) {
+      if (Number(meta.version) === r.version) { SY.version = r.version; SY.dirty = true; SY.state = 'saving'; cloudReady(); return; }
+      SY.version = Number(meta.version) || 0; SY.dirty = true; hideLogin(); SY.ready = true; render(); cloudConflict(r); if (!SY.booted) { SY.booted = true; initAutoBackup(); } return;
+    }
+    S = migrate(r.data); SY.version = r.version; SY.dirty = false; SY.state = 'saved'; SY.lastAt = r.updatedAt ? new Date(r.updatedAt) : null;
+    writeLocal(); cloudReady();
+  }
+  async function cloudRefresh(quiet) {
+    if (!CL || !SY.ready || SY.busy || SY.dirty || $('#modal-root').innerHTML) return;
+    try {
+      const v = await CL.version();
+      if (v == null || v <= SY.version) { if (!quiet) toast('Already up to date'); if (SY.state === 'offline') { SY.state = 'saved'; footStatus(); } return; }
+      const r = await CL.pull();
+      if (SY.dirty || SY.busy || r.notMember || r.version <= SY.version) return;
+      S = migrate(r.data); SY.version = r.version; SY.state = 'saved'; SY.lastAt = r.updatedAt ? new Date(r.updatedAt) : new Date();
+      writeLocal(); render(); toast('Updated with the latest changes from another device');
+    } catch (e) { if (!quiet) toast(e.message); }
+  }
+  if (CL) {
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') cloudRefresh(true); });
+    window.addEventListener('online', () => { if (SY.dirty) cloudPush(); else cloudRefresh(true); });
+    window.addEventListener('beforeunload', (e) => { if (SY.ready && (SY.dirty || SY.busy)) { e.preventDefault(); e.returnValue = ''; } });
   }
 
   // ---------- Excel backup ----------
@@ -555,9 +704,11 @@
   function banner() {
     if (loadError) return '<div class="banner">Saved data in this browser could not be read, so the app started empty. A copy was kept. Restore your latest Excel or JSON backup from Settings &amp; data.</div>';
     if (!storageOk) return '<div class="banner">This browser is blocking storage, so changes will be lost when you close the page. Export a backup from Settings &amp; data.</div>';
+    if (CL && SY.state === 'offline') return '<div class="banner">Not connected to the online database. Your changes are kept in this browser and will be saved online when the connection is back. <button class="btn sm" data-act="cloudSyncNow">Try again</button></div>';
+    if (CL && SY.state === 'auth') return '<div class="banner">Not saving online: your session has ended. <button class="btn sm" data-act="cloudRelogin">Sign in again</button></div>';
     if (AB.state === 'paused') return '<div class="banner">Automatic Excel backup is paused until you allow it again (the browser asks once per visit). <button class="btn sm" data-act="resumeBackup">Resume Excel backup</button></div>';
     const last = S.settings.lastBackup;
-    const stale = AB.state !== 'on' && S.started && (!last || daysFrom(last) < -7) && S.jobs.length > 0;
+    const stale = !CL && AB.state !== 'on' && S.started && (!last || daysFrom(last) < -7) && S.jobs.length > 0;
     return stale ? `<div class="banner">Your data lives only in this browser. ${last ? 'Last backup ' + fmtD(last) + '.' : 'No backup taken yet.'} <button class="btn sm" data-act="backupXlsx">Download Excel backup</button>${canAutoBackup() ? ' <button class="btn sm" data-act="chooseBackupDir">Turn on automatic backup</button>' : ''}</div>` : '';
   }
   const empty = (title, text, action) => `<div class="empty"><b>${esc(title)}</b>${esc(text)}${action ? `<div style="margin-top:12px">${action}</div>` : ''}</div>`;
@@ -706,7 +857,7 @@
       <p class="t-muted" style="max-width:60ch;margin:0 0 22px">Track every client job and statutory filing, the hours it took, what it cost, what you billed and what is still unpaid. Start with sample data to look around, or begin with your own clients.</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button class="btn primary" data-act="start">Start with my own data</button>
-        <button class="btn" data-act="demo">Explore with sample data</button>
+        ${CL ? '' : '<button class="btn" data-act="demo">Explore with sample data</button>'}
         <button class="btn" data-act="goImport">Restore a backup</button>
       </div></div>
       <div class="side"><b>Getting set up</b><ol style="margin:0;padding-left:18px;line-height:1.7">
@@ -1262,6 +1413,10 @@
           <div class="field"><label for="set-theme">Appearance</label><select class="input" id="set-theme" data-change="theme">${[['system', 'Match my device'], ['light', 'Light'], ['dark', 'Dark']].map(([v, l]) => `<option value="${v}" ${theme === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
         </div><div class="modal-f"><button class="btn primary" type="submit">Save settings</button></div></form>
       <div style="display:flex;flex-direction:column;gap:18px">
+        ${CL ? `<div class="card"><div class="card-h"><h2>Online database</h2><span class="hint">${SY.state === 'saved' && !SY.dirty ? '<span class="chip ok">Saved online</span>' : SY.state === 'offline' ? '<span class="chip warn">Offline</span>' : SY.state === 'auth' ? '<span class="chip bad">Signed out</span>' : '<span class="chip">Saving…</span>'}</span></div><div class="card-b">
+          <p style="margin:0 0 6px">Signed in as <b>${esc(CL.user?.email || '')}</b>.${SY.lastAt ? ' Last saved online ' + esc(SY.lastAt.toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })) + '.' : ''}</p>
+          <p class="t-muted" style="margin:0 0 12px">Every change is saved online within a few seconds, and a copy of each day’s data is kept online. Keep the Excel backup on as a second copy.</p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="cloudSyncNow">Check for changes</button><button class="btn" data-act="cloudSignOut">Sign out</button></div></div></div>` : ''}
         <div class="card"><div class="card-h"><h2>Automatic Excel backup</h2><span class="hint">${AB.state === 'on' ? '<span class="chip ok">On</span>' : AB.state === 'paused' ? '<span class="chip warn">Paused</span>' : AB.state === 'unsupported' ? '<span class="chip">Not available in this browser</span>' : '<span class="chip">Off</span>'}</span></div><div class="card-b">
           ${AB.state === 'unsupported' ? '<p class="t-muted" style="margin:0">Automatic backup to a folder works in Google Chrome or Microsoft Edge on a computer. Here, use the Download Excel backup button below.</p>'
           : AB.state === 'on' ? `<p style="margin:0 0 6px">Saving to folder <b>${esc(AB.dir?.name || '')}</b> about 3 seconds after every change.${AB.lastAt ? ' Last saved ' + esc(AB.lastAt) + '.' : ''}</p><p class="t-muted" style="margin:0 0 12px">Files: <span class="mono">Cloudbook-Desk-latest.xlsx</span> (always current) and one dated copy per day, e.g. <span class="mono">${xlsxName(true)}</span>. Pick a Google Drive or OneDrive folder and the backups also go to the cloud.</p><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-act="backupNow">Save backup now</button><button class="btn" data-act="chooseBackupDir">Change folder</button><button class="btn danger" data-act="stopBackup">Turn off</button></div>`
@@ -1276,7 +1431,7 @@
           <input type="file" id="import-file" accept=".json,.xlsx,application/json,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" data-change="importFile">
           <details style="margin-top:12px"><summary class="t-muted">Or paste backup text</summary><textarea class="input" id="import-text" style="margin-top:8px;min-height:120px" placeholder='{"version":1, …}'></textarea><button class="btn" style="margin-top:8px" data-act="importText">Import pasted text</button></details></div></div>
         <div class="card"><div class="card-h"><h2>Start again</h2></div><div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap">
-          <button class="btn" data-act="demo">Load sample data</button><button class="btn danger" data-act="wipe">Delete all data</button></div></div>
+          ${CL ? '' : '<button class="btn" data-act="demo">Load sample data</button>'}<button class="btn danger" data-act="wipe">Delete all data</button></div></div>
       </div></div>`;
   };
 
@@ -1752,6 +1907,12 @@
   const ACT = {
     close: closeModal,
     bgClose: (d, el, e) => { if (e.target === el) closeModal(); },
+    cloudSyncNow: () => { if (SY.dirty) { SY.state = 'saving'; footStatus(); cloudPush(); } else cloudRefresh(false); },
+    cloudRelogin: () => showLogin('Sign in again to keep saving online. Your changes are kept in this browser.'),
+    cloudSignOut: () => {
+      const go = async () => { await CL.signOut(); try { localStorage.removeItem(KEY); localStorage.removeItem(META); } catch (e) { /* storage blocked */ } location.hash = ''; location.reload(); };
+      if (SY.dirty || SY.busy) confirmBox('Sign out now?', 'Some changes are not saved online yet. Signing out now will discard them.', 'Sign out anyway', go); else go();
+    },
     formSave: () => { const d = readForm(); if (!d) return; if (formHandler.onSave(d) !== false) { closeModal(); commit(); } },
     formDelete: () => { const h = formHandler; closeModal(); h.onDelete(); commit(); },
     newJob: (d) => jobForm(null, d.client ? { clientId: d.client } : {}),
@@ -1840,7 +2001,7 @@
         S.filings.forEach((f) => { if (daysFrom(f.due) < -20 && (k++ % 4 !== 0)) { f.status = 'Filed'; f.filedOn = addDays(f.due, -3); f.srn = 'AB' + (4000000 + k * 137); } else if (daysFrom(f.due) < 25 && daysFrom(f.due) >= -20) f.status = 'In progress'; }); location.hash = '#dashboard'; commit(); toast('Sample data loaded'); };
       if (S.jobs.length || S.clients.length) { confirmBox('Replace your data with sample data?', 'Everything in this browser will be replaced with a sample firm. Download a backup first if you need it.', 'Load sample data', go); } else go();
     },
-    wipe: () => confirmBox('Delete all data?', 'Every client, job, time entry and invoice in this browser will be deleted. This cannot be undone unless you have a backup.', 'Delete everything', async () => { await snapshotBackup('before-delete'); S = blank(); location.hash = '#dashboard'; toast('All data deleted'); commit(); }, 'DELETE'),
+    wipe: () => confirmBox('Delete all data?', (CL ? 'Every client, job, time entry and invoice will be deleted, online and in this browser, for everyone who signs in. Restore from a backup or the daily online copy if needed.' : 'Every client, job, time entry and invoice in this browser will be deleted. This cannot be undone unless you have a backup.'), 'Delete everything', async () => { await snapshotBackup('before-delete'); S = blank(); location.hash = '#dashboard'; toast('All data deleted'); commit(); }, 'DELETE'),
   };
 
   // ---------- Event wiring ----------
@@ -1883,6 +2044,7 @@
       S.started = true; toast('Settings saved'); commit();
     }
     if (e.target.id === 'modal-form') { e.preventDefault(); ACT.formSave(); }
+    if (e.target.id === 'login-form') { e.preventDefault(); doLogin(e.target); }
   });
   $('#menu-btn').addEventListener('click', () => $('#app').classList.toggle('nav-open'));
   function applyTheme() {
@@ -1891,6 +2053,8 @@
   }
   window.addEventListener('hashchange', () => { closeModal(); render(); window.scrollTo(0, 0); });
 
-  load(); applyTheme(); render(); initAutoBackup();
+  load(); applyTheme();
+  if (CL) { $('#app').hidden = true; if (CL.signedIn()) cloudStart(); else showLogin(); }
+  else { render(); initAutoBackup(); }
   window.CloudbookDesk = { get state() { return S; }, render, _ab: AB, _write: () => writeAutoBackup() };
 })();

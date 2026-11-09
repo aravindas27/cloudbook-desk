@@ -343,3 +343,14 @@ a.kpi:hover { box-shadow: 0 0 0 1px var(--accent), var(--shadow); border-color: 
 .eyebrow { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 @media (max-width: 900px) { .welcome { grid-template-columns: 1fr; } .topbar { padding: 10px 16px; } .nav { box-shadow: 0 0 40px rgba(0,0,0,.2); } }
 @media print { .topbar { position: static; border: 0; } .kpi::before { display: none; } }
+
+/* ---------- Sign-in (online database) ---------- */
+.login { position: fixed; inset: 0; display: grid; place-items: center; padding: 16px; background: var(--paper); overflow-y: auto; z-index: 50; }
+.login-card { width: 100%; max-width: 400px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 28px; box-shadow: 0 10px 30px rgba(15, 27, 45, .08); }
+.login-card .brand-logo { height: 44px; width: auto; }
+.login-card h1 { font-size: 20px; margin: 20px 0 6px; color: var(--ink); }
+.login-card .login-msg { margin: 0 0 6px; font-size: 14px; }
+.login-card .field { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.login-card .btn { width: 100%; justify-content: center; margin-top: 16px; }
+.login-err { color: var(--bad); min-height: 1.3em; margin: 10px 0 0; font-size: 13px; }
+#nav-foot[data-sync="offline"], #nav-foot[data-sync="auth"] { color: var(--bad); }
