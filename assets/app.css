@@ -354,3 +354,8 @@ a.kpi:hover { box-shadow: 0 0 0 1px var(--accent), var(--shadow); border-color: 
 .login-card .btn { width: 100%; justify-content: center; margin-top: 16px; }
 .login-err { color: var(--bad); min-height: 1.3em; margin: 10px 0 0; font-size: 13px; }
 #nav-foot[data-sync="offline"], #nav-foot[data-sync="auth"] { color: var(--bad); }
+
+/* ---------- Cash flow table ---------- */
+.tbl.cf td:first-child { white-space: pre; min-width: 260px; }
+.tbl.cf tr.cf-h td { background: var(--panel-2); color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.tbl.cf tr.cf-b td { font-weight: 600; border-top: 1px solid var(--line-strong); }

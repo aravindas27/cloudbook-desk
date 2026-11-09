@@ -20,6 +20,9 @@
   const FILING_STATUS = ['Pending', 'In progress', 'Filed', 'Not applicable'];
   const EXP_CATS = ['Government / statutory fee', 'Late fee / interest (GST, TDS, ROC)', 'MCA / ROC filing fee', 'Tax paid for client (GST, TDS, advance tax)', 'DSC (digital signature)', 'Stamp paper / notary', 'Professional fee paid (auditor, valuer, advocate)', 'Travel and conveyance', 'Courier and postage', 'Printing and documents', 'Other'];
   const PAID_BY = ['Firm bank account', 'Partner personally', 'Cash', 'Firm card / UPI'];
+  const CASH_IN = ['Client fees received (not on an invoice here)', 'Capital introduced by partner', 'Loan received', 'Interest and other income', 'Refund received', 'Other receipt'];
+  const CASH_OUT = ['Rent', 'Salaries and wages', 'Electricity, internet and phone', 'Software and subscriptions', 'Travel and conveyance', 'Printing, stationery and postage', 'Office expenses', 'Professional fees paid', 'Firm’s own taxes and fees (GST, TDS, MCA)', 'Bank charges', 'Partner drawings', 'Loan repayment', 'Computer, furniture and equipment', 'Other payment'];
+  const ACCT_RE = /^(bank|cash|p:[A-Za-z0-9_-]{1,64})$/;
   // Statutory filings. kind 'annual': due on md in the first calendar year of the compliance FY
   // (accounts year just ended). kind 'tdsq': quarterly TDS returns. late = estimated late fee.
   const FILINGS = [
@@ -103,10 +106,10 @@
   let S;
   const blank = () => ({
     version: 1,
-    settings: { firmName: 'Cloudbook Associates LLP', gstin: '', pan: '', address: '', phone: '', email: '', gstRate: 18, fyStartMonth: 4, invoiceDueDays: 15, defaultCostRate: 350, capacityHours: 160, invoicePrefix: 'INV-', jobPrefix: 'J-', fyTarget: 1000000 },
+    settings: { firmName: 'Cloudbook Associates LLP', gstin: '', pan: '', address: '', phone: '', email: '', gstRate: 18, fyStartMonth: 4, invoiceDueDays: 15, defaultCostRate: 350, capacityHours: 160, invoicePrefix: 'INV-', jobPrefix: 'J-', fyTarget: 1000000, cashStart: '2026-11-01', openBank: 0, openCash: 0, openPartner: 0 },
     team: [{ id: 'm_owner', name: 'Aravind A S', role: 'Designated Partner', costRate: 500, billRate: 1200, capacity: 160, active: true }],
     services: DEFAULT_SERVICES.map(([name, category, recurring, fee, hours]) => ({ id: uid('s'), name, category, recurring, fee, hours })),
-    clients: [], jobs: [], time: [], invoices: [], filings: [], expenses: [],
+    clients: [], jobs: [], time: [], invoices: [], filings: [], expenses: [], cash: [],
     seq: { job: 0, invoice: 0 },
     started: false,
   });
@@ -129,9 +132,9 @@
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const okId = (v) => typeof v === 'string' && ID_RE.test(v);
   const isObj = (x) => !!x && typeof x === 'object' && !Array.isArray(x);
-  const COLLECTIONS = ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings', 'expenses'];
-  const REFS = { jobs: ['clientId', 'ownerId', 'invoiceId', 'nextId', 'filingId'], time: ['jobId', 'memberId'], invoices: ['clientId'], filings: ['clientId', 'jobId'], expenses: ['clientId', 'jobId', 'invoiceId', 'filingId'] };
-  const TEXT = ['name', 'title', 'period', 'service', 'notes', 'description', 'ref', 'number', 'code', 'category', 'paidBy', 'mode', 'role', 'contact', 'phone', 'email', 'gstin', 'pan', 'city', 'type', 'srn', 'key', 'note', 'priority', 'recurring'];
+  const COLLECTIONS = ['team', 'services', 'clients', 'jobs', 'time', 'invoices', 'filings', 'expenses', 'cash'];
+  const REFS = { jobs: ['clientId', 'ownerId', 'invoiceId', 'nextId', 'filingId'], time: ['jobId', 'memberId'], invoices: ['clientId'], filings: ['clientId', 'jobId'], expenses: ['clientId', 'jobId', 'invoiceId', 'filingId'], cash: ['clientId'] };
+  const TEXT = ['name', 'title', 'period', 'service', 'notes', 'description', 'ref', 'number', 'code', 'category', 'paidBy', 'mode', 'role', 'contact', 'phone', 'email', 'gstin', 'pan', 'city', 'type', 'srn', 'key', 'note', 'priority', 'recurring', 'kind', 'account', 'toAccount', 'party'];
   const NUMS = ['fee', 'budgetHours', 'govtFees', 'govtFee', 'hours', 'costRate', 'billRate', 'capacity', 'amount', 'tds', 'gst', 'reimb', 'total'];
   const DATES = ['date', 'due', 'start', 'doneOn', 'dueDate', 'filedOn', 'created'];
   // Returns a list of problems that make a file unsafe to import (bad ids or references).
@@ -177,6 +180,9 @@
     d.invoices.forEach((i) => { if (!i.date) i.date = todayISO(); });
     d.filings = d.filings.filter((f) => FIL[f.code]).map((f) => { if (!FILING_STATUS.includes(f.status)) f.status = 'Pending'; if (!f.due) f.due = todayISO(); return f; });
     d.expenses.forEach((e) => { if (!e.date) e.date = todayISO(); e.recover = e.recover !== false; });
+    d.cash = d.cash.filter((x) => x.date && ['in', 'out', 'transfer'].includes(x.kind) && ACCT_RE.test(x.account) && num(x.amount) > 0 && (x.kind !== 'transfer' || (ACCT_RE.test(x.toAccount) && x.toAccount !== x.account)));
+    d.cash.forEach((x) => { if (x.kind !== 'transfer') x.toAccount = ''; });
+    if (!DATE_RE.test(d.settings.cashStart)) d.settings.cashStart = b.settings.cashStart;
     d.team.forEach((m) => { m.active = m.active !== false; });
     if (!d.team.length) d.team = b.team;
     // Older versions kept "govt fees to recover" as a number on jobs and filings. Turn those into expense records once.
@@ -395,6 +401,7 @@
     add('Payments', S.invoices.flatMap((i) => i.payments.map((p) => ({ Invoice: i.number, Client: client(i.clientId).name, Date: p.date, Mode: p.mode, Amount: num(p.amount), TDS: num(p.tds), Reference: p.ref }))).sort((a, b) => String(a.Date).localeCompare(String(b.Date))), [13, 32, 11, 14, 11, 9, 24]);
     add('Expenses', S.expenses.slice().sort((a, b) => a.date.localeCompare(b.date)).map((e) => { const j = e.jobId ? job(e.jobId) : null; const inv = e.invoiceId ? byId(S.invoices, e.invoiceId) : null; return { Date: e.date, Client: client(e.clientId).name, Job: j ? j.title : '', Type: e.category, Description: e.description, 'Challan / SRN': e.ref, 'Paid from': e.paidBy, Amount: num(e.amount), 'Recover from client': e.recover ? 'Yes' : 'No', Status: expStatus(e), Invoice: inv ? inv.number : '', Notes: e.notes }; }), [11, 32, 32, 30, 40, 18, 18, 10, 10, 11, 13, 30]);
     add('Filings', S.filings.slice().sort((a, b) => a.due.localeCompare(b.due)).map((f) => ({ Client: client(f.clientId).name, Filing: FIL[f.code]?.name || f.code, Period: f.period, Due: f.due, Status: filingOverdue(f) ? 'Overdue' : f.status, 'Filed on': f.filedOn || '', SRN: f.srn, Fee: num(f.fee), 'Late fee so far (est.)': lateFee(f), Notes: f.notes })), [32, 36, 18, 11, 12, 11, 14, 9, 12, 40]);
+    add('Cash book', cashLines().map((l) => ({ Date: l.date, Type: l.kind === 'in' ? 'Received' : l.kind === 'out' ? 'Paid' : 'Transfer', Account: acctName(l.account), 'To account': l.kind === 'transfer' ? acctName(l.toAccount) : '', Category: l.category || '', 'Paid to / received from': l.party || '', Description: l.description || '', Reference: l.ref || '', In: l.kind === 'in' ? num(l.amount) : '', Out: l.kind === 'out' ? num(l.amount) : '', 'Transfer amount': l.kind === 'transfer' ? num(l.amount) : '', Source: l.src === 'manual' ? 'Cash book' : l.src === 'invoice' ? 'Invoice payment' : 'Client expense' })), [11, 9, 22, 22, 30, 26, 36, 16, 11, 11, 11, 14]);
     add('Team', S.team.map((m) => ({ Name: m.name, Role: m.role, 'Cost / hour': num(m.costRate), 'Bill rate / hour': num(m.billRate), 'Hours / month': num(m.capacity), Active: m.active === false ? 'No' : 'Yes' })), [20, 20, 11, 13, 12, 7]);
     add('Services', S.services.map((x) => ({ Service: x.name, Category: x.category, Repeats: x.recurring, 'Standard fee': num(x.fee), 'Budget hours': num(x.hours) })), [40, 14, 10, 12, 12]);
     const json = JSON.stringify({ ...S, exportedAt: new Date().toISOString(), app: 'cloudbook-desk' });
@@ -671,6 +678,7 @@
     reports: { tab: 'clients', period: 'fy', month: monthKey(todayISO()) },
     comp: { y1: null, view: 'grid', status: 'open', client: '', cat: '' },
     exp: { q: '', status: 'To recover', client: '', cat: '', sort: 'date', dir: -1 },
+    cash: { tab: 'book', acct: '', month: '', q: '' },
   };
 
   // ---------- Rendering ----------
@@ -1383,6 +1391,206 @@
     return kpis + recCard + table;
   };
 
+  // ---------- Cash book, partner expenses and cash flow ----------
+  // Manual entries live in S.cash. Client payments (invoices) and client expenses are added automatically,
+  // so nothing is typed twice. "Paid personally by <partner>" accounts track what the firm owes each partner.
+  const partners = () => { const p = S.team.filter((m) => /partner/i.test(m.role || '')); return p.length ? p : S.team.slice(0, 1); };
+  const acctName = (a) => (a === 'bank' ? 'Bank account' : a === 'cash' ? 'Cash in hand' : a && a.startsWith('p:') ? 'Paid by ' + (member(a.slice(2))?.name || 'partner') : '');
+  const acctOptions = () => [['bank', 'Bank account'], ['cash', 'Cash in hand'], ...partners().map((m) => ['p:' + m.id, 'Paid personally by ' + m.name])];
+  const paidByAcct = (pb) => (pb === 'Cash' ? 'cash' : pb === 'Partner personally' ? 'p:' + (partners()[0]?.id || 'm_owner') : 'bank');
+  const isFirmAcct = (a) => a === 'bank' || a === 'cash';
+  function cashLines() {
+    const from = S.settings.cashStart || '2026-11-01';
+    const L = S.cash.filter((x) => x.date >= from).map((x) => ({ ...x, src: 'manual' }));
+    S.invoices.forEach((i) => i.payments.forEach((p) => { if (p.date && p.date >= from && num(p.amount) > 0) L.push({ id: 'pay-' + p.id, src: 'invoice', srcId: i.id, date: p.date, kind: 'in', account: p.mode === 'Cash' ? 'cash' : 'bank', category: 'Client fees received', amount: num(p.amount), party: client(i.clientId).name, description: 'Payment for ' + i.number, ref: p.ref || '' }); }));
+    S.expenses.forEach((e) => { if (e.date >= from && num(e.amount) > 0) L.push({ id: 'exp-' + e.id, src: 'expense', srcId: e.id, date: e.date, kind: 'out', account: paidByAcct(e.paidBy), category: e.recover ? 'Paid for clients (to recover)' : 'Paid for clients (firm’s cost)', amount: num(e.amount), party: client(e.clientId).name, description: e.description || e.category, ref: e.ref || '' }); });
+    return L.sort((a, b) => a.date.localeCompare(b.date) || (a.kind === 'in' ? -1 : 1));
+  }
+  // How a line changes an account. Bank/cash: + is money in. Partner accounts: + means the firm owes that partner more.
+  function cashEffect(l, a) {
+    const amt = num(l.amount), p = a.startsWith('p:');
+    let v = 0;
+    if (l.kind === 'in' && l.account === a) v += p ? -amt : amt;
+    if (l.kind === 'out' && l.account === a) v += p ? amt : -amt;
+    if (l.kind === 'transfer') { if (l.account === a) v += p ? amt : -amt; if (l.toAccount === a) v += p ? -amt : amt; }
+    return v;
+  }
+  const cashOpening = (a) => (a === 'bank' ? num(S.settings.openBank) : a === 'cash' ? num(S.settings.openCash) : a === 'p:' + partners()[0]?.id ? num(S.settings.openPartner) : 0);
+  function cashBalance(a, lines, upto) { return cashOpening(a) + sum(lines.filter((l) => !upto || l.date <= upto), (l) => cashEffect(l, a)); }
+  function cashFlow(lines) {
+    const start = monthKey(S.settings.cashStart || '2026-11-01');
+    const last = [monthKey(todayISO()), ...lines.map((l) => monthKey(l.date))].sort().pop();
+    const months = []; let [y, m] = start.split('-').map(Number);
+    while (months.length < 36) { const k = `${y}-${String(m).padStart(2, '0')}`; months.push(k); if (k >= last) break; m++; if (m > 12) { m = 1; y++; } }
+    const pids = partners().map((x) => 'p:' + x.id);
+    const inCats = new Map(), outCats = new Map();
+    const rows = months.map((mk) => {
+      const ml = lines.filter((l) => monthKey(l.date) === mk);
+      const endDate = mk + '-31';
+      const opening = cashOpening('bank') + cashOpening('cash') + sum(lines.filter((l) => monthKey(l.date) < mk), (l) => cashEffect(l, 'bank') + cashEffect(l, 'cash'));
+      const ins = {}, outs = {}; let partnerPaid = 0;
+      ml.forEach((l) => {
+        const amt = num(l.amount);
+        if (l.kind === 'in' && isFirmAcct(l.account)) ins[l.category] = (ins[l.category] || 0) + amt;
+        if (l.kind === 'out' && isFirmAcct(l.account)) outs[l.category] = (outs[l.category] || 0) + amt;
+        if (l.kind === 'out' && !isFirmAcct(l.account)) partnerPaid += amt;
+        if (l.kind === 'transfer' && isFirmAcct(l.account) && !isFirmAcct(l.toAccount)) outs['Repaid to partners'] = (outs['Repaid to partners'] || 0) + amt;
+        if (l.kind === 'transfer' && !isFirmAcct(l.account) && isFirmAcct(l.toAccount)) ins['Money put in by partners'] = (ins['Money put in by partners'] || 0) + amt;
+      });
+      Object.keys(ins).forEach((c) => inCats.set(c, 1)); Object.keys(outs).forEach((c) => outCats.set(c, 1));
+      const tin = sum(Object.values(ins), (v) => v), tout = sum(Object.values(outs), (v) => v);
+      const owed = sum(pids, (a) => cashBalance(a, lines, endDate));
+      const spend = tout - (outs['Repaid to partners'] || 0) - (outs['Partner drawings'] || 0) - (outs['Loan repayment'] || 0) + partnerPaid;
+      return { mk, opening, ins, outs, tin, tout, net: tin - tout, closing: opening + tin - tout, partnerPaid, owed, spend };
+    });
+    return { months, rows, inCats: [...inCats.keys()], outCats: [...outCats.keys()] };
+  }
+  function cashFlowTable(cf) {
+    const cols = [{ key: 'item', label: 'Cash flow' }, ...cf.rows.map((r) => ({ key: r.mk, label: monthLabel(r.mk), n: true })), { key: 'total', label: 'Total', n: true }];
+    const line = (item, get, total = true) => { const o = { item }; let t = 0; cf.rows.forEach((r) => { const v = get(r); o[r.mk] = v; t += v || 0; }); o.total = total ? t : ''; return o; };
+    const out = [];
+    out.push({ ...line('Opening balance (bank + cash)', (r) => r.opening, false), _b: 1, total: cf.rows[0]?.opening ?? 0 });
+    out.push({ item: 'Money in', _h: 1 });
+    cf.inCats.forEach((c) => out.push(line('   ' + c, (r) => r.ins[c] || 0)));
+    out.push({ ...line('Total money in', (r) => r.tin), _b: 1 });
+    out.push({ item: 'Money out', _h: 1 });
+    cf.outCats.forEach((c) => out.push(line('   ' + c, (r) => r.outs[c] || 0)));
+    out.push({ ...line('Total money out', (r) => r.tout), _b: 1 });
+    out.push({ ...line('Net cash flow', (r) => r.net), _b: 1 });
+    const lastR = cf.rows[cf.rows.length - 1];
+    out.push({ ...line('Closing balance (bank + cash)', (r) => r.closing, false), _b: 1, total: lastR ? lastR.closing : 0 });
+    out.push({ item: 'Partners', _h: 1 });
+    out.push(line('   Paid by partners for the firm (not from firm cash)', (r) => r.partnerPaid));
+    out.push({ ...line('   Firm owes partners at month end', (r) => r.owed, false), total: lastR ? lastR.owed : 0 });
+    out.push({ ...line('Total spending, including partner-paid', (r) => r.spend), _b: 1 });
+    return { cols, rows: out };
+  }
+  PAGES.cashbook = () => {
+    const f = UI.cash, lines = cashLines(), today = todayISO(), mk = monthKey(today);
+    setHead('Cash book', `Cash and bank ledger, partner expenses and cash flow from ${fmtD(S.settings.cashStart)}`, `<button class="btn" data-act="cashOpening">Opening balances</button> <button class="btn" data-act="newCash" data-kind="in">Money in</button> <button class="btn primary" data-act="newCash" data-kind="out">Money out</button>`);
+    const bank = cashBalance('bank', lines), cash = cashBalance('cash', lines);
+    const owed = sum(partners(), (m) => cashBalance('p:' + m.id, lines));
+    const ml = lines.filter((l) => monthKey(l.date) === mk);
+    const minF = sum(ml.filter((l) => l.kind === 'in' && isFirmAcct(l.account)), (l) => l.amount) + sum(ml.filter((l) => l.kind === 'transfer' && !isFirmAcct(l.account) && isFirmAcct(l.toAccount)), (l) => l.amount);
+    const moutF = sum(ml.filter((l) => l.kind === 'out' && isFirmAcct(l.account)), (l) => l.amount) + sum(ml.filter((l) => l.kind === 'transfer' && isFirmAcct(l.account) && !isFirmAcct(l.toAccount)), (l) => l.amount);
+    const kpis = `<section class="kpis">
+      <div class="kpi ${bank < 0 ? 'alert' : ''}"><span class="l">Bank balance</span><span class="v">${inrC(bank)}</span><span class="s">opening ${inr(num(S.settings.openBank))} on ${fmtDs(S.settings.cashStart)}</span></div>
+      <div class="kpi ${cash < 0 ? 'alert' : ''}"><span class="l">Cash in hand</span><span class="v">${inrC(cash)}</span><span class="s">opening ${inr(num(S.settings.openCash))}</span></div>
+      <div class="kpi ${owed > 0 ? 'alert' : ''}"><span class="l">Firm owes partners</span><span class="v">${inrC(owed)}</span><span class="s">paid personally, not yet repaid</span></div>
+      <div class="kpi ${minF - moutF < 0 ? 'alert' : 'good'}"><span class="l">Net cash flow, ${monthLabel(mk)}</span><span class="v">${inrC(minF - moutF)}</span><span class="s">in ${inr(minF)} · out ${inr(moutF)}</span></div>
+    </section>`;
+    const tabs = [['book', 'Cash book'], ['partner', 'Partner expenses'], ['flow', 'Cash flow']];
+    const tabBar = `<div class="tabs">${tabs.map(([k, l]) => `<button class="${f.tab === k ? 'on' : ''}" data-act="cashTab" data-k="${k}">${l}</button>`).join('')}</div>`;
+    const srcChip = (l) => (l.src === 'invoice' ? '<span class="chip acc">From invoice</span>' : l.src === 'expense' ? '<span class="chip">From expenses</span>' : '');
+    const rowAct = (l) => (l.src === 'manual' ? `data-act="editCash" data-id="${l.id}"` : l.src === 'invoice' ? `data-act="cashSrc" data-src="invoice" data-id="${l.srcId}"` : `data-act="cashSrc" data-src="expense" data-id="${l.srcId}"`);
+    const amtIn = (l, a) => { const v = a ? cashEffect(l, a) : (l.kind === 'in' ? num(l.amount) : 0); return v > 0 ? inr(v) : ''; };
+    const amtOut = (l, a) => { const v = a ? cashEffect(l, a) : (l.kind === 'out' ? num(l.amount) : 0); return a ? (v < 0 ? inr(-v) : '') : (v ? inr(v) : ''); };
+    const acctCell = (l) => esc(acctName(l.account)) + (l.kind === 'transfer' ? ' → ' + esc(acctName(l.toAccount)) : '');
+    let body = '';
+    if (f.tab === 'book') {
+      const q = f.q.trim().toLowerCase();
+      const a = f.acct;
+      let rows = lines.filter((l) => (!a || l.account === a || l.toAccount === a) && (!q || [l.description, l.category, l.party, l.ref].join(' ').toLowerCase().includes(q)));
+      let run = a ? cashOpening(a) : 0;
+      const withBal = rows.map((l) => { if (a) run += cashEffect(l, a); return { l, bal: run }; });
+      const shown = withBal.filter((x) => !f.month || monthKey(x.l.date) === f.month).reverse();
+      const pLabel = a && a.startsWith('p:') ? 'Firm owes' : 'Balance';
+      body = `<div class="card">${tabBar}<div class="card-b"><div class="filters">
+          <input class="input search" id="f-cash-q" type="search" placeholder="Search description, party, reference…" value="${esc(f.q)}" data-filter="cash.q" aria-label="Search cash book">
+          <select class="input" id="f-cash-acct" data-filter="cash.acct" aria-label="Account"><option value="">All accounts</option>${acctOptions().map(([v, l]) => `<option value="${v}" ${a === v ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+          <input class="input" type="month" id="f-cash-month" value="${esc(f.month)}" data-filter="cash.month" aria-label="Month" style="width:auto">
+          ${f.month ? '<button class="btn sm" data-act="cashClearMonth">All months</button>' : ''}</div></div>
+        ${shown.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Details</th><th>Account</th><th class="n">In</th><th class="n">Out</th>${a ? `<th class="n">${pLabel}</th>` : ''}<th></th></tr></thead><tbody>
+          ${shown.map(({ l, bal }) => `<tr class="click" ${rowAct(l)}><td style="width:90px">${fmtDs(l.date)}</td><td>${esc(l.description || l.category)}<small>${esc(l.kind === 'transfer' ? 'Transfer' : l.category)}${l.party ? ' · ' + esc(l.party) : ''}${l.ref ? ' · ' + esc(l.ref) : ''}</small></td><td>${acctCell(l)}</td><td class="n t-ok">${amtIn(l, a)}</td><td class="n">${amtOut(l, a)}</td>${a ? `<td class="n">${inr(bal)}</td>` : ''}<td>${srcChip(l)}</td></tr>`).join('')}
+          </tbody></table></div>` : empty('No entries yet', 'Record money received and paid from ' + fmtD(S.settings.cashStart) + '. Client payments and client expenses appear here automatically.', '<button class="btn primary" data-act="newCash" data-kind="out">Money out</button>')}</div>`;
+    } else if (f.tab === 'partner') {
+      body = `<div class="card">${tabBar}<div class="card-b"><p class="t-muted" style="margin:0">Record what each partner pays personally for the firm (rent, travel, software, client fees paid from their own account). The firm owes it back until you record a repayment.</p></div></div>` +
+        partners().map((m) => {
+          const a = 'p:' + m.id; const pl = lines.filter((l) => l.account === a || l.toAccount === a);
+          let run = cashOpening(a); const rows = pl.map((l) => { run += cashEffect(l, a); return { l, bal: run }; }).reverse();
+          const bal = cashBalance(a, lines);
+          return `<div class="card"><div class="card-h"><h2>${esc(m.name)}</h2><span class="hint">Firm owes <b>${inr(bal)}</b></span></div>
+            <div class="card-b" style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" data-act="newCash" data-kind="out" data-acct="${a}">Add expense paid by ${esc(m.name.split(' ')[0])}</button><button class="btn" data-act="newCash" data-kind="transfer" data-acct="bank" data-to="${a}" data-amt="${Math.max(0, Math.round(bal))}">Record repayment to ${esc(m.name.split(' ')[0])}</button><button class="btn" data-act="newCash" data-kind="in" data-acct="${a}">Client money received personally</button></div>
+            ${rows.length ? `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Date</th><th>Details</th><th class="n">Paid for firm</th><th class="n">Repaid / received</th><th class="n">Firm owes</th><th></th></tr></thead><tbody>
+            ${rows.map(({ l, bal: b2 }) => { const v = cashEffect(l, a); return `<tr class="click" ${rowAct(l)}><td style="width:90px">${fmtDs(l.date)}</td><td>${esc(l.description || l.category)}<small>${esc(l.kind === 'transfer' ? 'Transfer · ' + acctName(l.account) + ' → ' + acctName(l.toAccount) : l.category)}${l.party ? ' · ' + esc(l.party) : ''}</small></td><td class="n">${v > 0 ? inr(v) : ''}</td><td class="n t-ok">${v < 0 ? inr(-v) : ''}</td><td class="n">${inr(b2)}</td><td>${srcChip(l)}</td></tr>`; }).join('')}
+            </tbody></table></div>` : empty('Nothing recorded yet', 'Add the first expense paid personally from ' + fmtD(S.settings.cashStart) + '.')}</div>`;
+        }).join('');
+    } else {
+      const t = cashFlowTable(cashFlow(lines));
+      body = `<div class="card">${tabBar}<div class="card-b"><div class="filters"><span class="t-muted" style="font-size:12.5px">Firm’s bank and cash only. Expenses paid by partners show separately until repaid. Transfers between bank and cash are left out.</span><span style="flex:1"></span><button class="btn sm" data-act="exportCashFlow">Export CSV</button></div></div>
+        <div class="tbl-wrap"><table class="tbl cf"><thead><tr>${t.cols.map((c) => `<th class="${c.n ? 'n' : ''}">${c.label}</th>`).join('')}</tr></thead><tbody>
+        ${t.rows.map((r) => r._h ? `<tr class="cf-h"><td colspan="${t.cols.length}">${esc(r.item)}</td></tr>` : `<tr class="${r._b ? 'cf-b' : ''}">${t.cols.map((c) => c.key === 'item' ? `<td>${esc(r.item)}</td>` : `<td class="n">${r[c.key] === '' || r[c.key] == null ? '' : inr(r[c.key])}</td>`).join('')}</tr>`).join('')}
+        </tbody></table></div></div>`;
+    }
+    return kpis + body;
+  };
+  function cashForm(x, preset = {}) {
+    const isNew = !x;
+    const v = x ? { ...x } : { date: todayISO(), kind: preset.kind || 'out', account: preset.acct || 'bank', toAccount: preset.to || '', amount: preset.amt || '', category: '' };
+    if (!v.category) v.category = v.kind === 'in' ? (v.account.startsWith('p:') ? CASH_IN[0] : CASH_IN[0]) : v.kind === 'out' ? 'Office expenses' : '';
+    const catOpts = (k) => (k === 'in' ? CASH_IN : k === 'out' ? CASH_OUT : ['Transfer']);
+    const toOpts = () => [['', 'Choose account'], ...acctOptions()];
+    form({
+      title: isNew ? (v.kind === 'in' ? 'Money received' : v.kind === 'out' ? 'Money paid out' : 'Transfer between accounts') : 'Edit cash book entry', wide: true,
+      intro: 'Client payments on invoices and client expenses already appear in the cash book automatically. Use this for everything else: rent, salaries, the firm’s own bills, partner expenses, capital, drawings and transfers.',
+      values: v,
+      fields: [
+        { name: 'kind', label: 'Type', type: 'select', options: [['out', 'Money paid out'], ['in', 'Money received'], ['transfer', 'Transfer between accounts (incl. repaying a partner)']] },
+        { name: 'date', label: 'Date', type: 'date', required: true },
+        { name: 'account', label: 'Paid from / received in', type: 'select', options: acctOptions },
+        { name: 'toAccount', label: 'Transfer to', type: 'select', options: toOpts },
+        { name: 'amount', label: 'Amount (₹)', type: 'number', required: true, min: 0, step: '0.01' },
+        { name: 'category', label: 'Category', type: 'select', options: () => catOpts(v.kind) },
+        { name: 'party', label: 'Paid to / received from', placeholder: 'e.g. landlord, KSEB, Zoho, staff name' },
+        { name: 'ref', label: 'Reference', placeholder: 'UTR, cheque or bill number' },
+        { name: 'description', label: 'Description', full: true, required: true, placeholder: 'e.g. Office rent November 2026' },
+        { name: 'notes', label: 'Notes', type: 'textarea', full: true },
+      ],
+      submit: isNew ? 'Save entry' : 'Save changes',
+      onSave: (d) => {
+        d.amount = num(d.amount);
+        if (d.amount <= 0) { toast('Enter the amount'); return false; }
+        if (!['in', 'out', 'transfer'].includes(d.kind) || !ACCT_RE.test(d.account)) { toast('Choose the account'); return false; }
+        if (d.kind === 'transfer') {
+          if (!ACCT_RE.test(d.toAccount) || d.toAccount === d.account) { toast('Choose a different account to transfer to'); return false; }
+          d.category = 'Transfer';
+        } else { d.toAccount = ''; if (!catOpts(d.kind).includes(d.category)) d.category = catOpts(d.kind)[0]; }
+        if (d.date < S.settings.cashStart) toast(`Saved, but the cash book starts on ${fmtD(S.settings.cashStart)}, so it won’t show`);
+        if (isNew) { S.cash.push({ id: uid('c'), ...d }); S.started = true; toast('Entry saved'); } else { Object.assign(x, d); toast('Entry updated'); }
+        return true;
+      },
+      onDelete: x ? () => { S.cash = S.cash.filter((y) => y.id !== x.id); toast('Entry deleted'); } : null,
+    });
+    const k = $('#fld-kind'), cat = $('#fld-category'), to = $('#fld-toAccount');
+    const sync = () => {
+      const kv = k.value;
+      if (to) to.closest('.field').hidden = kv !== 'transfer';
+      if (cat) { const cur = cat.value; const opts = catOpts(kv); cat.innerHTML = opts.map((o) => `<option ${o === cur ? 'selected' : ''}>${esc(o)}</option>`).join(''); cat.closest('.field').hidden = kv === 'transfer'; }
+      const lab = $('label[for="fld-account"]'); if (lab) lab.textContent = kv === 'in' ? 'Received in' : kv === 'out' ? 'Paid from' : 'Transfer from';
+    };
+    if (k) { k.addEventListener('change', sync); sync(); }
+  }
+  function cashOpeningForm() {
+    const p = partners()[0];
+    form({
+      title: 'Opening balances',
+      intro: 'Enter the balances on the day the cash book starts, from your bank statement and cash count. Everything before that date is left out.',
+      values: { cashStart: S.settings.cashStart, openBank: S.settings.openBank, openCash: S.settings.openCash, openPartner: S.settings.openPartner },
+      fields: [
+        { name: 'cashStart', label: 'Cash book starts on', type: 'date', required: true },
+        { name: 'openBank', label: 'Bank balance on that day (₹)', type: 'number', step: '0.01' },
+        { name: 'openCash', label: 'Cash in hand on that day (₹)', type: 'number', step: '0.01' },
+        { name: 'openPartner', label: `Firm already owed ${p ? p.name : 'the partner'} (₹)`, type: 'number', step: '0.01', min: 0 },
+      ],
+      submit: 'Save balances',
+      onSave: (d) => {
+        if (!DATE_RE.test(d.cashStart || '')) { toast('Choose the start date'); return false; }
+        S.settings.cashStart = d.cashStart; S.settings.openBank = num(d.openBank); S.settings.openCash = num(d.openCash); S.settings.openPartner = num(d.openPartner);
+        S.started = true; toast('Opening balances saved'); return true;
+      },
+    });
+  }
+
   PAGES.team = () => {
     setHead('Team & services', 'Who does the work, what their time costs, and your standard fees', `<button class="btn" data-act="newService">New service</button> <button class="btn primary" data-act="newMember">New team member</button>`);
     return `<div class="card"><div class="card-h"><h2>Team</h2><span class="hint">Cost rate drives job costing. Bill rate is what an hour is worth to a client.</span></div>
@@ -1875,7 +2083,7 @@
     ACT.importReplace = async () => { await snapshotBackup('before-replace'); S = migrate(d); S.started = true; delete S.exportedAt; delete S.app; closeModal(); location.hash = '#dashboard'; toast('Data imported'); commit(); };
     ACT.importMerge = () => {
       const m = migrate(JSON.parse(JSON.stringify(d))); let added = 0;
-      ['clients', 'services', 'team', 'jobs', 'time', 'invoices', 'filings', 'expenses'].forEach((k) => {
+      ['clients', 'services', 'team', 'jobs', 'time', 'invoices', 'filings', 'expenses', 'cash'].forEach((k) => {
         const have = new Set(S[k].map((x) => x.id));
         const keys = k === 'filings' ? new Set(S.filings.map((x) => x.key)) : null;
         m[k].forEach((x) => { if (!have.has(x.id) && !(keys && keys.has(x.key))) { S[k].push(x); added++; } });
@@ -1907,6 +2115,13 @@
   const ACT = {
     close: closeModal,
     bgClose: (d, el, e) => { if (e.target === el) closeModal(); },
+    cashTab: (d) => { UI.cash.tab = d.k; render(); },
+    cashClearMonth: () => { UI.cash.month = ''; render(); },
+    newCash: (d) => cashForm(null, { kind: d.kind, acct: d.acct, to: d.to, amt: d.amt ? num(d.amt) : '' }),
+    editCash: (d) => { const x = byId(S.cash, d.id); if (x) cashForm(x); },
+    cashSrc: (d) => { if (d.src === 'invoice') location.hash = '#invoice/' + d.id; else { const x = byId(S.expenses, d.id); if (x) expenseForm(x); } },
+    cashOpening: () => cashOpeningForm(),
+    exportCashFlow: () => { const t = cashFlowTable(cashFlow(cashLines())); const rows = t.rows.map((r) => (r._h ? { item: r.item } : r)); download(`cloudbook-cash-flow-${todayISO()}.csv`, toCSV(t.cols, rows), 'text/csv'); toast('CSV exported'); },
     cloudSyncNow: () => { if (SY.dirty) { SY.state = 'saving'; footStatus(); cloudPush(); } else cloudRefresh(false); },
     cloudRelogin: () => showLogin('Sign in again to keep saving online. Your changes are kept in this browser.'),
     cloudSignOut: () => {
